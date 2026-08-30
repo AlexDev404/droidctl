@@ -161,66 +161,8 @@ class FakeScrcpyServer(private val context: Context) : FakeServerEndpoint {
         data.writeInt(size)
     }
 
-    private data class SamplePacket(val data: ByteArray, val isConfig: Boolean, val isKeyFrame: Boolean)
-
-    /**
-     * Splits the recorded Annex-B stream into scrcpy-shaped packets.
-     *
-     * The leading parameter sets (SPS/PPS) become one config packet; every VCL
-     * NAL, together with any non-VCL NALs preceding it, becomes one media
-     * packet. That is the shape `MediaCodec` on a Target produces.
-     */
-    private fun loadStream(): List<SamplePacket> {
-        val bytes = context.assets.open(SAMPLE_ASSET).use { it.readBytes() }
-        val nals = splitAnnexB(bytes)
-        require(nals.isNotEmpty()) { "$SAMPLE_ASSET is not an Annex-B H.264 stream" }
-
-        val packets = mutableListOf<SamplePacket>()
-        val pending = mutableListOf<ByteArray>()
-        for (nal in nals) {
-            val type = nal[startCodeLength(nal)].toInt() and 0x1F
-            pending += nal
-            // Parameter sets and SEI are not frames; they ride along with the
-            // next VCL NAL (or become the config packet, for the leading ones).
-            if (type != NAL_NON_IDR && type != NAL_IDR) continue
-            val payload = pending.reduce { a, b -> a + b }
-            pending.clear()
-            if (packets.isEmpty()) {
-                // The parameter sets that precede the first frame go out as a
-                // config packet of their own, exactly as MediaCodec emits them.
-                val configEnd = payload.size - nal.size
-                if (configEnd > 0) {
-                    packets += SamplePacket(payload.copyOfRange(0, configEnd), isConfig = true, isKeyFrame = false)
-                }
-                packets += SamplePacket(nal, isConfig = false, isKeyFrame = type == NAL_IDR)
-            } else {
-                packets += SamplePacket(payload, isConfig = false, isKeyFrame = type == NAL_IDR)
-            }
-        }
-        return packets
-    }
-
-    /** Splits an Annex-B stream into NAL units, each keeping its start code. */
-    private fun splitAnnexB(bytes: ByteArray): List<ByteArray> {
-        val offsets = mutableListOf<Int>()
-        var i = 0
-        while (i + 2 < bytes.size) {
-            if (bytes[i].toInt() == 0 && bytes[i + 1].toInt() == 0 && bytes[i + 2].toInt() == 1) {
-                // A four-byte start code is a three-byte one preceded by a zero.
-                offsets += if (i > 0 && bytes[i - 1].toInt() == 0) i - 1 else i
-                i += 3
-            } else {
-                i++
-            }
-        }
-        return offsets.mapIndexed { index, offset ->
-            val end = offsets.getOrNull(index + 1) ?: bytes.size
-            bytes.copyOfRange(offset, end)
-        }
-    }
-
-    /** 3 for `00 00 01`, 4 for `00 00 00 01`. */
-    private fun startCodeLength(nal: ByteArray): Int = if (nal[2].toInt() == 1) 3 else 4
+    private fun loadStream(): List<SamplePacket> =
+        AnnexBPacketizer.packetize(context.assets.open(SAMPLE_ASSET).use { it.readBytes() })
 
     private fun say(message: String) {
         synchronized(lines) {
