@@ -48,6 +48,9 @@ class VideoDecoder(
     private var callbackThread: HandlerThread? = null
     private var surface: Surface? = null
 
+    /** False while the Host has no usable surface (it is backgrounded). */
+    private var surfaceValid = false
+
     /** Input buffer indices the codec has offered and we have not filled yet. */
     private val availableInputBuffers = ArrayDeque<Int>()
 
@@ -78,9 +81,46 @@ class VideoDecoder(
     private val _stats = MutableStateFlow(DecoderStats())
     val stats: StateFlow<DecoderStats> = _stats.asStateFlow()
 
-    /** Sets the surface to render into. Must be called before the first packet. */
+    /**
+     * Points the decoder at a surface to render into.
+     *
+     * Safe to call while decoding: the Host losing and regaining its surface is
+     * routine (every time the app is backgrounded), and tearing the session down
+     * and re-establishing it over that would mean a fresh `adb push`, server
+     * launch and handshake every time the user glances at another app.
+     * `setOutputSurface` hands the running codec the new surface instead.
+     */
     fun attachSurface(surface: Surface) {
-        synchronized(lock) { this.surface = surface }
+        synchronized(lock) {
+            val previous = this.surface
+            this.surface = surface
+            surfaceValid = true
+            val codec = this.codec ?: return
+            if (previous === surface) return
+            try {
+                codec.setOutputSurface(surface)
+                log.d("Rendering resumed on a new surface")
+            } catch (e: Exception) {
+                // Only reachable if the codec refuses the swap; a fresh codec on
+                // the next size record is the fallback.
+                log.w("Could not swap the decoder's output surface", e)
+                surfaceValid = false
+            }
+        }
+    }
+
+    /**
+     * The surface is going away; stop rendering into it but keep decoding.
+     *
+     * Frames still have to be consumed while the Host is backgrounded, or the
+     * codec stalls and the stream backs up behind it. They are released without
+     * rendering until a surface comes back.
+     */
+    fun detachSurface() {
+        synchronized(lock) {
+            surfaceValid = false
+            log.d("Surface detached; decoding continues without rendering")
+        }
     }
 
     override fun onSizeChanged(width: Int, height: Int) {
@@ -121,8 +161,14 @@ class VideoDecoder(
         }
     }
 
+    /**
+     * The stream ended. Only releases the codec.
+     *
+     * Reporting the cause is deliberately left to the session: it wraps this
+     * sink and already reports end of stream, and two reports for one event
+     * would count as two reconnect attempts.
+     */
     override fun onEndOfStream(cause: Throwable?) {
-        if (cause != null) onFatalError(cause)
         release()
     }
 
@@ -167,7 +213,9 @@ class VideoDecoder(
                     index: Int,
                     info: MediaCodec.BufferInfo,
                 ) {
-                    val render = info.size > 0
+                    // Rendering into a surface that has been destroyed throws;
+                    // the frame is still released so the codec keeps flowing.
+                    val render = info.size > 0 && synchronized(lock) { surfaceValid }
                     runCatching { codec.releaseOutputBuffer(index, render) }
                         .onFailure { log.w("Could not release output buffer $index", it) }
                     if (render) recordDecodedFrame(info.presentationTimeUs)
@@ -186,6 +234,7 @@ class VideoDecoder(
             created.configure(format, target, null, 0)
             created.start()
             codec = created
+            surfaceValid = true
 
             log.i("Decoder started for ${width}x$height (${created.name})")
             _stats.value = _stats.value.copy(width = width, height = height, codecName = created.name)

@@ -91,10 +91,10 @@ fun DroidCtlApp(container: AppContainer) {
                     session = session,
                     target = current.target,
                     settings = settings!!,
-                    onExit = {
-                        session.requestStop()
-                        screen = Screen.Connect
-                    },
+                    // Navigating away disposes MirrorScreen, whose DisposableEffect
+                    // stops the session. Stopping here as well would queue a
+                    // second teardown racing the next start.
+                    onExit = { screen = Screen.Connect },
                     onDebugPane = { screen = Screen.DebugPane },
                 )
             }

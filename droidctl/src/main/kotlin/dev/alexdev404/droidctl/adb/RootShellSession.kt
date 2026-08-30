@@ -66,7 +66,7 @@ class RootShellSession {
      * only place a server-side Java stack trace ever appears.
      */
     suspend fun startLongLived(binary: AdbBinary, command: AdbCommand): RootProcess =
-        withContext(Dispatchers.IO) { RootProcess.start(binary, command) }
+        withContext(Dispatchers.IO) { RootProcess.start(binary, command, this@RootShellSession) }
 
     companion object {
         /**
@@ -98,6 +98,7 @@ class RootShellSession {
 class RootProcess private constructor(
     private val shell: Shell,
     private val label: String,
+    private val owner: RootShellSession,
 ) {
     private val log = DroidCtlLog.server
     private val closed = AtomicBoolean(false)
@@ -132,14 +133,21 @@ class RootProcess private constructor(
      * which closes the server's sockets, which is how the scrcpy server on the
      * Target learns to exit. Idempotent.
      */
-    fun close() {
+    suspend fun close() {
         if (!closed.compareAndSet(false, true)) return
         val pidToKill = pid
         if (pidToKill != null && exitCode == null) {
             // Signalled from the *shared* shell: the dedicated one is blocked in
-            // `wait` on exactly this pid and cannot run anything else.
-            runCatching { Shell.cmd("kill -TERM $pidToKill 2>/dev/null").exec() }
-                .onFailure { log.w("Could not signal $label (pid=$pidToKill)", it) }
+            // `wait` on exactly this pid and cannot run anything else. Routed
+            // through the owning session so it takes that shell's mutex rather
+            // than interleaving with whatever adb command is already running on
+            // it, which would mix the two commands' output.
+            runCatching {
+                owner.runRaw(
+                    "kill -TERM $pidToKill 2>/dev/null",
+                    AdbCommand.of("kill", "-TERM", pidToKill.toString()),
+                )
+            }.onFailure { log.w("Could not signal $label (pid=$pidToKill)", it) }
         }
         runCatching { shell.close() }
             .onFailure { log.w("Could not close the shell running $label", it) }
@@ -149,7 +157,11 @@ class RootProcess private constructor(
     companion object {
         private const val PID_MARKER = "__DROIDCTL_PID__:"
 
-        internal fun start(binary: AdbBinary, command: AdbCommand): RootProcess {
+        internal fun start(
+            binary: AdbBinary,
+            command: AdbCommand,
+            owner: RootShellSession,
+        ): RootProcess {
             val label = command.toString()
             // A dedicated shell: this command runs for the whole session. Same
             // flags as the shared one, so adb resolves to the same binary.
@@ -157,7 +169,7 @@ class RootProcess private constructor(
                 .setFlags(RootShellSession.SHELL_FLAGS)
                 .setTimeout(RootShellSession.SHELL_TIMEOUT_SECONDS)
                 .build()
-            val process = RootProcess(shell, label)
+            val process = RootProcess(shell, label, owner)
 
             // Start in the background so the shell survives to report the pid,
             // then block on it so libsu still sees the job run to completion.

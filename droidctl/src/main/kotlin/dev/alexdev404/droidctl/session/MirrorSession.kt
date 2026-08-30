@@ -85,6 +85,7 @@ class MirrorSession(
     private var fakeEndpoint: FakeServerEndpoint? = null
     private var connection: ScrcpyConnection? = null
     private var controlChannel: ControlChannel? = null
+    @Volatile
     private var decoder: VideoDecoder? = null
     private var pump: VideoStreamPump? = null
     private var rawDump: RawStreamDump? = null
@@ -92,6 +93,17 @@ class MirrorSession(
     private var statsJob: Job? = null
     private var viewportJob: Job? = null
     private var startJob: Job? = null
+
+    /**
+     * Bumped for every start attempt and every teardown.
+     *
+     * The decoder and the video pump report failures asynchronously, so a report
+     * can arrive after the attempt it belongs to is already gone. Without a
+     * generation to compare against, a dead attempt's end-of-stream tears down
+     * the *live* session that replaced it -- which is how a single background /
+     * foreground cycle turns into a reconnect that never settles.
+     */
+    private var generation = 0
     private var activeForward: Pair<String, Int>? = null
     private var activeTarget: KnownTarget? = null
     private var activeSettings: MirrorSettings = MirrorSettings()
@@ -104,6 +116,9 @@ class MirrorSession(
     private var stopping = false
 
     private var reconnectAttempt = 0
+
+    /** When the current session started streaming, for the reconnect budget. */
+    private var streamingSinceMillis = 0L
 
     // ------------------------------------------------------------------
     // Startup housekeeping
@@ -181,12 +196,17 @@ class MirrorSession(
      * leaves a forward or a server process behind.
      */
     fun start(target: KnownTarget, settings: MirrorSettings) {
-        startJob = scope.launch {
+        val job = scope.launch {
             lifecycleMutex.withLock {
                 if (_state.value.isBusy || _state.value is SessionState.Streaming) {
                     log.w("start() ignored: a session is already ${_state.value.label}")
                     return@withLock
                 }
+                // Whoever starts a session owns cleaning up after the last one.
+                // Teardown is idempotent and a no-op when nothing is live, and
+                // doing it here means a stop() that raced this start can safely
+                // stand aside rather than tearing down what it just built.
+                teardownLocked(disconnectAdb = false)
                 stopping = false
                 activeTarget = target
                 activeSettings = settings
@@ -194,9 +214,13 @@ class MirrorSession(
                 startLocked(target, settings)
             }
         }
+        startJob = job
     }
 
     private suspend fun startLocked(target: KnownTarget, settings: MirrorSettings) {
+        // Everything this attempt creates is tagged with this number, so a
+        // report from a previous attempt can be told apart and dropped.
+        generation++
         val options = ScrcpyOptions(
             scid = ScrcpyOptions.generateScid(),
             maxSize = settings.maxSize,
@@ -265,7 +289,7 @@ class MirrorSession(
 
             streamPump.start()
 
-            reconnectAttempt = 0
+            streamingSinceMillis = System.currentTimeMillis()
             _state.value = SessionState.Streaming(target, info, opened.meta)
             scoped.i(
                 "Streaming from ${target.name} " +
@@ -299,7 +323,7 @@ class MirrorSession(
             rawDump = dump
             _rawDumpPath.value = dump.path
             log.i("Raw-dump mode: writing the payload stream to ${dump.path} (no decoder)")
-            return SessionVideoSink(dump)
+            return SessionVideoSink(dump, generation)
         }
 
         // The surface may not exist yet if the mirror screen has not finished
@@ -312,14 +336,27 @@ class MirrorSession(
                 "No mirror surface appeared within ${SURFACE_TIMEOUT_MS}ms; there is nothing to " +
                     "render the Target's video into"
             )
-        val videoDecoder = VideoDecoder(scid) { error -> scope.launch { onStreamFailure(error) } }
+        val myGeneration = generation
+        val videoDecoder = VideoDecoder(scid) { error ->
+            scope.launch { onStreamFailure(myGeneration, error) }
+        }
         videoDecoder.attachSurface(surface)
         decoder = videoDecoder
+
+        // The Host losing its surface (the user switched apps) is routine, not a
+        // session failure: keep decoding, stop rendering, and pick the new
+        // surface up when it comes back.
+        surfaceBridge.onSurfaceLifecycle = { current ->
+            val active = decoder
+            if (active != null) {
+                if (current != null) active.attachSurface(current) else active.detachSurface()
+            }
+        }
         statsJob = scope.launch { videoDecoder.stats.collect { _decoderStats.value = it } }
         // Seed the decoder with the size from the handshake; the stream sends
         // another size record on every change.
         videoDecoder.onSizeChanged(meta.width, meta.height)
-        return SessionVideoSink(videoDecoder)
+        return SessionVideoSink(videoDecoder, myGeneration)
     }
 
     /**
@@ -327,7 +364,10 @@ class MirrorSession(
      * a Target size change (the touch transform is stale until it does) and the
      * stream ending (otherwise a dead session keeps reporting "Streaming").
      */
-    private inner class SessionVideoSink(private val delegate: VideoSink) : VideoSink {
+    private inner class SessionVideoSink(
+        private val delegate: VideoSink,
+        private val generation: Int,
+    ) : VideoSink {
         override fun onSizeChanged(width: Int, height: Int) {
             targetSize = width to height
             refreshViewport()
@@ -342,7 +382,8 @@ class MirrorSession(
             if (stopping) return
             scope.launch {
                 onStreamFailure(
-                    cause ?: IOException("The Target closed the video stream (the scrcpy server exited)")
+                    generation,
+                    cause ?: IOException("The Target closed the video stream (the scrcpy server exited)"),
                 )
             }
         }
@@ -380,12 +421,31 @@ class MirrorSession(
     // Failure and reconnect
     // ------------------------------------------------------------------
 
-    private suspend fun onStreamFailure(error: Throwable) {
+    /**
+     * A stream failed.
+     *
+     * @param reportedGeneration which start attempt the report came from.
+     *   Anything older than the current attempt is stale: the session it refers
+     *   to has already been torn down, and acting on it would kill the live one.
+     */
+    private suspend fun onStreamFailure(reportedGeneration: Int, error: Throwable) {
         if (stopping) return
         lifecycleMutex.withLock {
             // Teardown may have started while this was waiting for the lock.
             if (stopping) return
+            if (reportedGeneration != generation) {
+                log.d("Ignoring a failure from a previous session attempt: ${error.message}")
+                return
+            }
             val target = activeTarget
+
+            // A session that streamed for a while before dropping gets a fresh
+            // budget; one that fails immediately, over and over, must not
+            // reconnect forever.
+            val streamedFor = if (streamingSinceMillis == 0L) 0L
+            else System.currentTimeMillis() - streamingSinceMillis
+            if (streamedFor >= STABLE_SESSION_MS) reconnectAttempt = 0
+
             if (target == null || reconnectAttempt >= MAX_RECONNECT_ATTEMPTS) {
                 failLocked("streaming", error, serverOutputLines())
                 return
@@ -444,12 +504,23 @@ class MirrorSession(
      * `onDestroy` while a start is still in flight.
      */
     suspend fun stop(disconnectAdb: Boolean = false) {
+        // Captured before anything else: a start() that lands while this is
+        // running installs a newer job, and cancelling *that* would abort the
+        // session the user just asked for and strand it at its initial state.
+        val jobToCancel = startJob
         // Set before taking the lock so a start still inside the socket retry
         // loop stops treating its own failure as something to reconnect from.
         stopping = true
-        startJob?.cancelAndJoin()
-        startJob = null
+        jobToCancel?.cancelAndJoin()
         lifecycleMutex.withLock {
+            if (startJob !== jobToCancel) {
+                // A start() landed while this was waiting. That session is the
+                // user's current intent and it cleans up after this one itself,
+                // so stopping here would tear down what they just asked for.
+                log.d("stop() stood aside for a newer start()")
+                return
+            }
+            startJob = null
             if (_state.value == SessionState.Idle && serverHandle == null && connection == null) return
             teardownLocked(disconnectAdb)
             _state.value = SessionState.Stopped
@@ -469,6 +540,10 @@ class MirrorSession(
      */
     private suspend fun teardownLocked(disconnectAdb: Boolean) {
         stopping = true
+        // Anything still in flight from this attempt is now stale.
+        generation++
+        streamingSinceMillis = 0L
+        surfaceBridge.onSurfaceLifecycle = null
 
         viewportJob?.cancel()
         viewportJob = null
@@ -529,6 +604,12 @@ class MirrorSession(
     private companion object {
         const val MAX_RECONNECT_ATTEMPTS = 3
         const val RECONNECT_DELAY_MS = 1_000L
+
+        /**
+         * How long a session must stream before a later failure is treated as a
+         * fresh problem rather than a continuation of the last one.
+         */
+        const val STABLE_SESSION_MS = 10_000L
         const val SERVER_LOG_LINES = 300
         const val SURFACE_TIMEOUT_MS = 10_000L
     }
