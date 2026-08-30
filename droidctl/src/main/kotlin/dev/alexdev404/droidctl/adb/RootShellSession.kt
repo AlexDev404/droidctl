@@ -67,6 +67,23 @@ class RootShellSession {
      */
     suspend fun startLongLived(binary: AdbBinary, command: AdbCommand): RootProcess =
         withContext(Dispatchers.IO) { RootProcess.start(binary, command) }
+
+    companion object {
+        /**
+         * Flags for every root shell this app opens, the shared one and the
+         * dedicated ones alike.
+         *
+         * `FLAG_MOUNT_MASTER` puts the shell in the global mount namespace. What
+         * matters more than the choice itself is that it is the *same* choice
+         * everywhere: a dedicated shell in a different namespace could resolve
+         * `/system/xbin/adb` differently from the shell that found it at
+         * startup, and the resulting "adb: not found" would surface as a scrcpy
+         * server that never starts.
+         */
+        const val SHELL_FLAGS = Shell.FLAG_MOUNT_MASTER
+
+        const val SHELL_TIMEOUT_SECONDS = 20L
+    }
 }
 
 /**
@@ -134,8 +151,12 @@ class RootProcess private constructor(
 
         internal fun start(binary: AdbBinary, command: AdbCommand): RootProcess {
             val label = command.toString()
-            // A dedicated shell: this command runs for the whole session.
-            val shell = Shell.Builder.create().setFlags(0).build()
+            // A dedicated shell: this command runs for the whole session. Same
+            // flags as the shared one, so adb resolves to the same binary.
+            val shell = Shell.Builder.create()
+                .setFlags(RootShellSession.SHELL_FLAGS)
+                .setTimeout(RootShellSession.SHELL_TIMEOUT_SECONDS)
+                .build()
             val process = RootProcess(shell, label)
 
             // Start in the background so the shell survives to report the pid,
