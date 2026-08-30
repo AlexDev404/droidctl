@@ -121,6 +121,11 @@ fun ConnectScreen(
             )
         },
     ) { padding ->
+        // Item keys are namespaced per section because LazyColumn requires them
+        // to be unique across the whole list, not per items() block. A Target
+        // you have connected to appears both under "Known Targets" and under
+        // "adb devices" with the same serial -- that is the normal case, not an
+        // edge case, and a bare serial as the key crashes the list outright.
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
@@ -169,7 +174,7 @@ fun ConnectScreen(
 
             if (known.isNotEmpty()) {
                 item { SectionHeader("Known Targets") }
-                items(known, key = { it.serial }) { target ->
+                items(known, key = { "known:${it.serial}" }) { target ->
                     KnownTargetCard(
                         target = target,
                         enabled = !busy,
@@ -189,7 +194,7 @@ fun ConnectScreen(
                     )
                 }
             } else {
-                items(discovered, key = { it.serviceName }) { target ->
+                items(discovered, key = { "mdns:${it.serviceName}" }) { target ->
                     DiscoveredTargetCard(
                         target = target,
                         enabled = !busy,
@@ -204,7 +209,7 @@ fun ConnectScreen(
             if (devices.isEmpty()) {
                 item { Text("No devices attached.", style = MaterialTheme.typography.bodySmall) }
             } else {
-                items(devices, key = { it.serial }) { device -> AdbDeviceCard(device) }
+                items(devices, key = { "adb:${it.serial}" }) { device -> AdbDeviceCard(device) }
             }
 
             item { Spacer(Modifier.height(24.dp)) }

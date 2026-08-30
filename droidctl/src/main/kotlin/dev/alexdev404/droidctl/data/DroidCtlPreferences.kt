@@ -47,6 +47,12 @@ class DroidCtlPreferences(private val context: Context) {
         (prefs[KEY_KNOWN_TARGETS] ?: emptySet())
             .mapNotNull { decodeTarget(it) }
             .sortedByDescending { it.lastConnectedAtMillis }
+            // The stored set is keyed by the whole JSON blob, so two entries for
+            // one Target that differ only in name or timestamp would both
+            // survive. rememberTarget already prevents that, but the list is
+            // rendered with the serial as a list key and a duplicate there is a
+            // crash rather than a cosmetic problem. Newest wins.
+            .distinctBy { it.serial }
     }
 
     val settings: Flow<MirrorSettings> = context.dataStore.data.map { prefs ->
