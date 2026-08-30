@@ -1,0 +1,56 @@
+name: DroidCtl
+
+# The Android host app added by this fork. Separate from release.yml so that
+# scrcpy's own release pipeline is untouched.
+
+on:
+  push:
+    paths:
+      - 'droidctl/**'
+      - 'server/**'
+      - 'gradle/**'
+      - '*.gradle'
+      - 'settings.gradle'
+      - '.github/workflows/droidctl.yml'
+  pull_request:
+    paths:
+      - 'droidctl/**'
+      - 'server/**'
+      - 'gradle/**'
+      - '*.gradle'
+      - 'settings.gradle'
+      - '.github/workflows/droidctl.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup JDK
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      # Also builds :server, since :droidctl bundles the server it produces.
+      - name: Build
+        run: ./gradlew :droidctl:assembleDebug :droidctl:assembleRelease
+
+      - name: Unit tests
+        run: ./gradlew :droidctl:testDebugUnitTest
+
+      - name: Lint
+        run: ./gradlew :droidctl:lintDebug
+
+      - name: Upload test report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: droidctl-test-report
+          path: droidctl/build/reports/

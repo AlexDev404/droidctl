@@ -1,0 +1,136 @@
+package dev.alexdev404.droidctl.scrcpy
+
+import dev.alexdev404.droidctl.DroidCtlLog
+import dev.alexdev404.droidctl.adb.AdbClient
+import dev.alexdev404.droidctl.adb.RootProcess
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.IOException
+import java.net.ServerSocket
+
+/**
+ * A scrcpy server running on the Target, plus the adb forward that reaches it.
+ */
+class ScrcpyServerHandle(
+    val serial: String,
+    val hostPort: Int,
+    val process: RootProcess,
+) {
+    /** Everything the server has printed. The only place its stack traces appear. */
+    val output get() = process.output
+
+    /** Everything printed so far, for a failure message. */
+    fun snapshot() = process.snapshot()
+}
+
+/**
+ * Starts the scrcpy server on the Target and sets up the tunnel to it.
+ *
+ * The launch sequence mirrors the reference client (`app/src/server.c`):
+ * push the jar, forward a Host port onto the Target's abstract socket, then
+ * run `app_process` with the classpath pointing at the jar.
+ */
+class ScrcpyLauncher(
+    private val adb: AdbClient,
+    private val asset: ScrcpyServerAsset,
+) {
+    private val log = DroidCtlLog.server
+
+    /**
+     * Pushes the server, opens the forward and starts `app_process`.
+     *
+     * The returned handle owns the process; the caller must close it on every
+     * teardown path and must remove the forward itself (the launcher does not
+     * know when the session is over).
+     */
+    suspend fun launch(serial: String, options: ScrcpyOptions): Result<ScrcpyServerHandle> {
+        val scoped = log.withScid(options.socketName)
+
+        asset.pushTo(adb, serial).getOrElse { return Result.failure(it) }
+
+        val hostPort = openForward(serial, options, scoped).getOrElse { return Result.failure(it) }
+
+        val command = buildShellCommand(options)
+        scoped.i("Starting scrcpy ${ScrcpyProtocol.VERSION} on $serial via 127.0.0.1:$hostPort")
+        scoped.d("app_process command: $command")
+
+        val process = runCatching { adb.shellStreaming(serial, command) }
+            .getOrElse { error ->
+                // Do not leak the forward we just created.
+                adb.removeForward(serial, hostPort)
+                return Result.failure(
+                    IOException("Could not start the scrcpy server on $serial", error)
+                )
+            }
+
+        return Result.success(ScrcpyServerHandle(serial, hostPort, process))
+    }
+
+    /**
+     * Allocates a Host port and forwards it onto the Target's abstract socket.
+     *
+     * Picking a port by binding an ephemeral one and letting it go is inherently
+     * racy: another process -- or a forward this app leaked in a previous run --
+     * can take it between the close and the `adb forward`. Retrying with a fresh
+     * port is cheaper than trying to hold the port reserved.
+     */
+    private suspend fun openForward(
+        serial: String,
+        options: ScrcpyOptions,
+        scoped: dev.alexdev404.droidctl.DroidCtlLog,
+    ): Result<Int> {
+        var lastError: Throwable? = null
+        repeat(PORT_ATTEMPTS) { attempt ->
+            val hostPort = allocateHostPort().getOrElse { return Result.failure(it) }
+            adb.forward(serial, hostPort, "localabstract:${options.socketName}")
+                .onSuccess { return Result.success(hostPort) }
+                .onFailure { error ->
+                    lastError = error
+                    scoped.w(
+                        "Could not forward tcp:$hostPort (attempt ${attempt + 1}/$PORT_ATTEMPTS); " +
+                            "trying another port"
+                    )
+                }
+        }
+        return Result.failure(
+            IOException("Could not open an adb forward after $PORT_ATTEMPTS attempts", lastError)
+        )
+    }
+
+    /**
+     * The `app_process` command line.
+     *
+     * `CLASSPATH` must be set in the environment of the command, and the scrcpy
+     * version must be the first positional argument: the server compares it to
+     * its own `BuildConfig.VERSION_NAME` and aborts on a mismatch. That check is
+     * deliberate upstream behaviour and is not worked around here -- a mismatch
+     * means the bundled jar and this code disagree about the wire format.
+     */
+    internal fun buildShellCommand(options: ScrcpyOptions): String = buildString {
+        append("CLASSPATH=").append(ScrcpyOptions.DEVICE_SERVER_PATH)
+        append(" app_process / com.genymobile.scrcpy.Server ")
+        append(ScrcpyProtocol.VERSION)
+        for (argument in options.toArguments()) {
+            append(' ').append(argument)
+        }
+    }
+
+    /**
+     * Picks a free Host port by binding an ephemeral one and letting it go.
+     *
+     * Inherently racy -- something else can take the port between the close and
+     * the forward -- so the caller retries. Binding on 127.0.0.1 keeps the
+     * probe off the network.
+     */
+    private suspend fun allocateHostPort(): Result<Int> = withContext(Dispatchers.IO) {
+        runCatching {
+            ServerSocket(0, 1, java.net.InetAddress.getLoopbackAddress()).use { it.localPort }
+        }.recoverCatching { error ->
+            throw IOException("Could not allocate a local port for the adb tunnel", error)
+        }
+    }
+
+    private companion object {
+        const val PORT_ATTEMPTS = 3
+    }
+}

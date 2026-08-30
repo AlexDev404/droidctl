@@ -3,6 +3,41 @@
 source for the project. Do not download releases from random websites, even if
 their name contains `scrcpy`.**
 
+---
+
+# DroidCtl (this fork)
+
+This fork adds **DroidCtl** (`droidctl/`), a native Android application that
+mirrors and controls a *second* Android device over wireless ADB.
+
+* **Host** — a **rooted** Android device (Magisk) with the
+  [`adb-ndk`](https://github.com/Magisk-Modules-Repo/adb-ndk) module installed,
+  running DroidCtl. This is the device you hold.
+* **Target** — an ordinary **unrooted, stock** Android device with *Wireless
+  debugging* enabled. Nothing is permanently installed on it.
+
+DroidCtl **bundles an unmodified build of the scrcpy server, version 4.1**,
+compiled from the `server/` sources in this repository and shipped in the APK as
+`scrcpy-server.jar`. It is not patched or modified in any way. scrcpy is
+Copyright (C) 2018 Genymobile and Copyright (C) 2018-2026 Romain Vimont, and is
+licensed under the [Apache License 2.0](LICENSE); the full license text ships
+inside the APK at `assets/licenses/scrcpy-LICENSE` and is shown in the app under
+**Settings → Open source licenses**. Upstream scrcpy is at
+<https://github.com/Genymobile/scrcpy>.
+
+| | |
+|---|---|
+| App sources and build notes | [`droidctl/README.md`](droidctl/README.md) |
+| Wire protocol, as verified against the pinned server | [`docs/PROTOCOL.md`](docs/PROTOCOL.md) |
+| Real-hardware test checklist | [`docs/MANUAL-TEST.md`](docs/MANUAL-TEST.md) |
+
+Build it with `./gradlew :droidctl:assembleDebug`; run its tests with
+`./gradlew :droidctl:testDebugUnitTest`.
+
+*Everything below this line is scrcpy's own README, unchanged.*
+
+---
+
 # scrcpy (v4.1)
 
 <img src="app/data/scrcpy.svg" width="128" height="128" alt="scrcpy" align="right" />

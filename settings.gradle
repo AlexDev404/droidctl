@@ -1,1 +1,20 @@
+pluginManagement {
+    repositories {
+        google {
+            content {
+                includeGroupByRegex 'com\\.android.*'
+                includeGroupByRegex 'com\\.google.*'
+                includeGroupByRegex 'androidx.*'
+            }
+        }
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+// The scrcpy server, built as an APK and shipped as scrcpy-server.jar.
 include ':server'
+
+// DroidCtl: the Android host application that mirrors a second Android device.
+// It cannot be called ':app' because app/ already holds the scrcpy C client.
+include ':droidctl'
