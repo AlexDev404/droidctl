@@ -22,6 +22,16 @@ on:
       - '.github/workflows/droidctl.yml'
   workflow_dispatch:
 
+env:
+  # The repository's gradle.properties asks for 1536m, which is sized for
+  # building the scrcpy server jar on its own. Building :droidctl -- a Compose
+  # app, in two variants, with lint -- needs considerably more, and running out
+  # surfaces as an opaque "A failure occurred while executing
+  # <some>WorkAction" with the OutOfMemoryError nowhere in the summary.
+  # Overridden here rather than in gradle.properties so scrcpy's own builds keep
+  # upstream's setting.
+  GRADLE_OPTS: -Dorg.gradle.jvmargs=-Xmx4g -Dorg.gradle.daemon=false
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -38,13 +48,18 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
+      # One variant per step: it keeps peak memory down, and a failure names the
+      # variant instead of leaving two builds interleaved in one log.
       # Also builds :server, since :droidctl bundles the server it produces.
-      - name: Build
-        run: ./gradlew :droidctl:assembleDebug :droidctl:assembleRelease
+      - name: Build debug
+        run: ./gradlew :droidctl:assembleDebug --stacktrace
+
+      - name: Build release
+        run: ./gradlew :droidctl:assembleRelease --stacktrace
 
       # Uploaded before the tests and lint run, so a failing check still leaves
       # an installable build to reproduce the failure on real hardware with.
-      # The job's own status still depends on those checks passing.
+      # The job's own status still depends on those checks.
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
@@ -65,10 +80,10 @@ jobs:
           retention-days: 30
 
       - name: Unit tests
-        run: ./gradlew :droidctl:testDebugUnitTest
+        run: ./gradlew :droidctl:testDebugUnitTest --stacktrace
 
       - name: Lint
-        run: ./gradlew :droidctl:lintDebug
+        run: ./gradlew :droidctl:lintDebug --stacktrace
 
       - name: Upload test and lint reports on failure
         if: failure()

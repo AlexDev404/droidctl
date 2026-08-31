@@ -21,6 +21,17 @@ speaking scrcpy's control protocol. The novelty is the assembly.
 ./gradlew :droidctl:testDebugUnitTest    # golden-vector and touch-mapping tests
 ```
 
+The repository's `gradle.properties` sets `org.gradle.jvmargs=-Xmx1536m`, which
+is sized for building the scrcpy server jar alone. Building this module needs
+more, and the more cores a machine has the more parallel workers compete for
+that heap. If a build dies with an opaque *"A failure occurred while executing
+&lt;something&gt;WorkAction"* and no cause in the summary, that is what it is —
+re-run with `--stacktrace` to see the `OutOfMemoryError`, and build with more:
+
+```
+./gradlew :droidctl:assembleDebug -Dorg.gradle.jvmargs=-Xmx4g
+```
+
 `:droidctl:packageScrcpyServer` builds `:server` (the scrcpy server in this same
 repository) and copies the result into the APK's assets as `scrcpy-server.jar`
 alongside its SHA-256. The jar is therefore **not committed to git**: it is built
