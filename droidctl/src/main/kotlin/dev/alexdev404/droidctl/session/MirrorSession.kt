@@ -23,6 +23,7 @@ import dev.alexdev404.droidctl.scrcpy.ScrcpyConnection
 import dev.alexdev404.droidctl.scrcpy.ScrcpyLauncher
 import dev.alexdev404.droidctl.scrcpy.PushMeasurement
 import dev.alexdev404.droidctl.scrcpy.ScrcpyOptions
+import dev.alexdev404.droidctl.scrcpy.ServerDelivery
 import dev.alexdev404.droidctl.scrcpy.ScrcpyServerHandle
 import dev.alexdev404.droidctl.video.DecoderStats
 import dev.alexdev404.droidctl.video.RawStreamDump
@@ -266,19 +267,23 @@ class MirrorSession(
                 return
             }
 
-            _state.value = SessionState.PushingServer(target)
+            _state.value = SessionState.Preparing(target, "Delivering the scrcpy server")
 
-            // Pushing the jar is the only sizeable transfer that happens before
-            // there is a video stream, so it doubles as the bandwidth probe.
-            // Both settings a rung controls are fixed the moment the server
-            // starts, which is why the choice has to be made here and not later.
-            val measurement = launcher.pushServer(target.serial).getOrElse { error ->
+            // Only pushed when the Target does not already have this exact jar.
+            // When it is pushed, the transfer doubles as the bandwidth probe --
+            // it is the only sizeable transfer before the video stream exists.
+            val delivery = launcher.ensureServerOnTarget(target.serial).getOrElse { error ->
                 failLocked("push-server", error, serverOutputLines())
                 return
             }
-            _linkMeasurement.value = measurement
+            val fresh = (delivery as? ServerDelivery.Pushed)?.measurement
+            if (fresh != null) {
+                _linkMeasurement.value = fresh
+                preferences.rememberBandwidth(target, fresh.bitsPerSecond)
+            }
 
             if (_targetDisplay.value == null) {
+                _state.value = SessionState.Preparing(target, "Reading the Target's screen size")
                 // max_size is absolute while a rung is a fraction of the
                 // Target's own screen, so that size is needed before launching.
                 _targetDisplay.value = adb.displaySize(target.serial)
@@ -286,10 +291,16 @@ class MirrorSession(
                     .getOrNull()
             }
 
-            _quality.value = chooseQuality(settings.qualityMode, measurement)
+            _quality.value = resolveQuality(
+                mode = settings.qualityMode,
+                freshBitsPerSecond = fresh?.takeIf { it.isMeaningful }?.bitsPerSecond,
+                rememberedBitsPerSecond = target.lastMeasuredBitsPerSecond,
+                pushWasTooBriefToTime = fresh != null && !fresh.isMeaningful,
+            )
             val options = buildOptions(settings)
             val scoped = log.withScid(options.socketName)
 
+            _state.value = SessionState.Preparing(target, "Starting the scrcpy server")
             val handle = launcher.launch(target.serial, options).getOrElse { error ->
                 failLocked("start-server", error, serverOutputLines())
                 return
@@ -304,8 +315,7 @@ class MirrorSession(
             }
             scoped.i(
                 "Launching at ${_quality.value.label}" +
-                    (options.maxSize.takeIf { it > 0 }?.let { " (max_size=$it)" } ?: "") +
-                    ", link measured at ${measurement.bitsPerSecond / 1000} kbps"
+                    (options.maxSize.takeIf { it > 0 }?.let { " (max_size=$it)" } ?: "")
             )
 
             openStream(target, settings, options, handle.hostPort, sessionGeneration)
@@ -379,22 +389,29 @@ class MirrorSession(
     }
 
     /**
-     * The rung to launch on.
+     * The rung to launch on, and a log line saying why.
      *
-     * A fixed rung is used as-is. Automatic converts the push measurement into
-     * one, and treats a push too brief to time as evidence of a fast link rather
-     * than a slow one -- 700-odd kilobytes inside [PushMeasurement.MIN_MEANINGFUL_MS]
-     * is tens of megabits either way.
+     * A fixed rung is used as-is and nothing is measured for it -- the
+     * measurement only exists to answer a question the user has already
+     * answered.
      */
-    private fun chooseQuality(mode: QualityMode, measurement: PushMeasurement): ConnectionQuality {
-        if (mode is QualityMode.Fixed) return mode.quality
-        if (!measurement.isMeaningful) {
-            log.i("Link too fast to time reliably ($measurement); assuming the top rung")
-            return ConnectionQuality.entries.last()
+    private fun resolveQuality(
+        mode: QualityMode,
+        freshBitsPerSecond: Long?,
+        rememberedBitsPerSecond: Long?,
+        pushWasTooBriefToTime: Boolean,
+    ): ConnectionQuality {
+        if (mode is QualityMode.Fixed) {
+            log.i("Quality: ${mode.quality.label} (chosen in settings, not measured)")
+            return mode.quality
         }
-        val chosen = ConnectionQuality.forMeasuredBandwidth(measurement.bitsPerSecond)
-        log.i("Automatic quality: $measurement -> ${chosen.label}")
-        return chosen
+        val decision = QualityDecision.automatic(
+            freshBitsPerSecond,
+            rememberedBitsPerSecond,
+            pushWasTooBriefToTime,
+        )
+        log.i("Quality: ${decision.quality.label} (automatic: ${decision.reason})")
+        return decision.quality
     }
 
     private fun buildOptions(settings: MirrorSettings) = ScrcpyOptions(

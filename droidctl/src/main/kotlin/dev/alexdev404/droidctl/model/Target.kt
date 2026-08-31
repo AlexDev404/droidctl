@@ -33,6 +33,16 @@ data class KnownTarget(
     val host: String,
     val port: Int,
     val lastConnectedAtMillis: Long,
+    /**
+     * The link speed measured the last time the server jar was pushed to this
+     * Target, or null if it never has been.
+     *
+     * Remembered because the push is skipped once the Target already has the
+     * jar, and that is the only thing DroidCtl transfers before the video
+     * stream exists. Without this, Automatic would have nothing to go on for
+     * every session after the first.
+     */
+    val lastMeasuredBitsPerSecond: Long? = null,
 ) {
     val serial: String get() = "$host:$port"
 }

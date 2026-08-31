@@ -22,8 +22,15 @@ sealed interface SessionState {
     /** `adb connect` is in flight. */
     data class Connecting(val target: String) : SessionState
 
-    /** Pushing `scrcpy-server.jar` to the Target. */
-    data class PushingServer(val target: KnownTarget) : SessionState
+    /**
+     * Getting ready to launch: delivering the server jar, reading the Target's
+     * display size, choosing a quality rung.
+     *
+     * Carries the actual [step] because these are slow on a poor link -- a
+     * single fixed label left the user watching "Pushing the scrcpy server" long
+     * after the push had finished, which reads as a hang.
+     */
+    data class Preparing(val target: KnownTarget, val step: String) : SessionState
 
     /** `app_process` has been launched; the server has not accepted yet. */
     data class StartingServer(val target: KnownTarget, val connection: ConnectionInfo) : SessionState
@@ -60,7 +67,7 @@ sealed interface SessionState {
     ) : SessionState
 
     val isBusy: Boolean
-        get() = this is Pairing || this is Connecting || this is PushingServer ||
+        get() = this is Pairing || this is Connecting || this is Preparing ||
             this is StartingServer || this is AwaitingSockets || this is Reconnecting
 
     val label: String
@@ -68,7 +75,7 @@ sealed interface SessionState {
             is Idle -> "Idle"
             is Pairing -> "Pairing with $target"
             is Connecting -> "Connecting to $target"
-            is PushingServer -> "Pushing scrcpy server"
+            is Preparing -> step
             is StartingServer -> "Starting scrcpy server"
             is AwaitingSockets -> "Waiting for the scrcpy server"
             is Streaming -> "Streaming ${meta.width}x${meta.height}"

@@ -65,7 +65,15 @@ with `wm size`, so a rung means the same thing on a 720p phone and a 1440p one.
 
 Automatic measures the link by **timing the `scrcpy-server.jar` push**, which
 has to happen anyway: no extra traffic and no added delay. It then picks the
-best rung whose bit rate fits inside 60% of the measurement. The margin covers
+best rung whose bit rate fits inside 60% of the measurement.
+
+The jar is only pushed when the Target does not already have a byte-identical
+copy — its SHA-256 is checked first. That matters most on exactly the links
+Automatic exists for: re-sending three quarters of a megabyte costs nearly half
+a minute at 256 kbps, every session. When the push is skipped there is nothing
+to time, so the figure from the last real push to that Target is remembered and
+reused. It is therefore only refreshed when the bundled server version changes;
+if the network has changed since, pick a rung by hand. The margin covers
 what the push does not measure — it runs Host to Target while video runs the
 other way, and an encoder treats its bit rate as an average it overshoots on
 scene changes. A push too brief to time is treated as a fast link, not a slow
@@ -77,8 +85,9 @@ The debug pane shows the measurement, the chosen rung, the resulting
 ## How a session works
 
 1. `adb connect <host>:<port>` — Target appears in `adb devices`.
-2. Extract `scrcpy-server.jar` from assets, verify its SHA-256, `adb push` it to
-   `/data/local/tmp/` — timing the push, which is the bandwidth probe.
+2. Extract `scrcpy-server.jar` from assets and verify its SHA-256; push it to
+   `/data/local/tmp/` only if the Target's copy differs, timing the transfer as
+   the bandwidth probe.
 3. Read `wm size` and pick the quality rung.
 4. Bind an ephemeral local port, then
    `adb forward tcp:<port> localabstract:scrcpy_<scid>`.

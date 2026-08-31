@@ -56,6 +56,18 @@ data class PushMeasurement(
 }
 
 /**
+ * How the server jar got to the Target.
+ */
+sealed interface ServerDelivery {
+
+    /** It was transferred, and the transfer was timed. */
+    data class Pushed(val measurement: PushMeasurement) : ServerDelivery
+
+    /** The Target already had a byte-identical copy, so nothing was sent. */
+    data object AlreadyPresent : ServerDelivery
+}
+
+/**
  * Starts the scrcpy server on the Target and sets up the tunnel to it.
  *
  * The launch sequence mirrors the reference client (`app/src/server.c`):
@@ -76,21 +88,51 @@ class ScrcpyLauncher(
      * know when the session is over).
      */
     /**
-     * Pushes the server jar and times the transfer.
+     * Makes sure the Target has the right server jar, pushing it only if it does
+     * not already.
      *
-     * Separate from [launch] because the quality rung has to be decided between
-     * the two: the push is what measures the link, and `max_size` and
-     * `video_bit_rate` are fixed the moment the server starts.
+     * Re-sending three quarters of a megabyte at the start of every session is
+     * most of the wait on a slow link -- nearly half a minute at 256 kbps, every
+     * single time -- so the Target's copy is checksummed first and left alone
+     * when it matches. Comparing digests rather than sizes or timestamps means a
+     * jar left behind by a different scrcpy version is still replaced; a
+     * mismatched server aborts at startup with an error that reads like a
+     * protocol bug.
+     *
+     * Separate from [launch] because the quality rung is decided between the
+     * two: a push is what measures the link, and `max_size` and `video_bit_rate`
+     * are both fixed the moment the server starts.
      */
-    suspend fun pushServer(serial: String): Result<PushMeasurement> {
+    suspend fun ensureServerOnTarget(serial: String): Result<ServerDelivery> {
         val jar = asset.extract().getOrElse { return Result.failure(it) }
+        val expected = asset.expectedSha256()
+
+        if (targetHasServer(serial, expected)) {
+            log.i("The Target already has this scrcpy server; skipping the push")
+            return Result.success(ServerDelivery.AlreadyPresent)
+        }
+
         val startedAt = System.nanoTime()
         adb.push(serial, jar, ScrcpyOptions.DEVICE_SERVER_PATH)
             .getOrElse { return Result.failure(it) }
         val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000
         val measurement = PushMeasurement(jar.length(), elapsedMs)
         log.i("Pushed the scrcpy server: $measurement")
-        return Result.success(measurement)
+        return Result.success(ServerDelivery.Pushed(measurement))
+    }
+
+    /**
+     * Whether the Target's copy of the jar already matches [expectedSha256].
+     *
+     * Any failure here -- no `sha256sum` on the Target, no such file, a garbled
+     * reply -- answers "no", so the worst case is the push we would have done
+     * anyway.
+     */
+    private suspend fun targetHasServer(serial: String, expectedSha256: String): Boolean {
+        val output = adb.shell(serial, "sha256sum ${ScrcpyOptions.DEVICE_SERVER_PATH} 2>/dev/null")
+            .getOrElse { return false }
+        val digest = output.trim().substringBefore(' ').lowercase()
+        return digest.isNotEmpty() && digest == expectedSha256
     }
 
     /**

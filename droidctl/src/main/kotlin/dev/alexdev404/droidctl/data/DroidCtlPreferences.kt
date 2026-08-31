@@ -91,10 +91,15 @@ class DroidCtlPreferences(private val context: Context) {
 
     suspend fun rememberTarget(target: KnownTarget) {
         context.dataStore.edit { prefs ->
-            val existing = (prefs[KEY_KNOWN_TARGETS] ?: emptySet())
-                .mapNotNull { decodeTarget(it) }
-                .filterNot { it.host == target.host && it.port == target.port }
-            prefs[KEY_KNOWN_TARGETS] = (existing + target).map { encodeTarget(it) }.toSet()
+            val stored = (prefs[KEY_KNOWN_TARGETS] ?: emptySet()).mapNotNull { decodeTarget(it) }
+            val previous = stored.firstOrNull { it.host == target.host && it.port == target.port }
+            val others = stored.filterNot { it.host == target.host && it.port == target.port }
+            // Reconnecting must not throw away what an earlier session measured.
+            val merged = target.copy(
+                lastMeasuredBitsPerSecond =
+                    target.lastMeasuredBitsPerSecond ?: previous?.lastMeasuredBitsPerSecond,
+            )
+            prefs[KEY_KNOWN_TARGETS] = (others + merged).map { encodeTarget(it) }.toSet()
         }
     }
 
@@ -105,6 +110,23 @@ class DroidCtlPreferences(private val context: Context) {
                 .filterNot { it.host == target.host && it.port == target.port }
                 .map { encodeTarget(it) }
                 .toSet()
+        }
+    }
+
+    /**
+     * Records what the last push to this Target measured, so Automatic still has
+     * a figure on later sessions when the push is skipped.
+     */
+    suspend fun rememberBandwidth(target: KnownTarget, bitsPerSecond: Long) {
+        context.dataStore.edit { prefs ->
+            val entries = (prefs[KEY_KNOWN_TARGETS] ?: emptySet()).mapNotNull { decodeTarget(it) }
+            val existing = entries.firstOrNull { it.host == target.host && it.port == target.port }
+                ?: return@edit
+            prefs[KEY_KNOWN_TARGETS] =
+                (entries.filterNot { it.host == target.host && it.port == target.port } +
+                    existing.copy(lastMeasuredBitsPerSecond = bitsPerSecond))
+                    .map { encodeTarget(it) }
+                    .toSet()
         }
     }
 
@@ -167,6 +189,7 @@ class DroidCtlPreferences(private val context: Context) {
         put("host", target.host)
         put("port", target.port)
         put("lastConnectedAt", target.lastConnectedAtMillis)
+        target.lastMeasuredBitsPerSecond?.let { put("lastMeasuredBps", it) }
     }.toString()
 
     private fun decodeTarget(raw: String): KnownTarget? = runCatching {
@@ -176,6 +199,7 @@ class DroidCtlPreferences(private val context: Context) {
             host = json.getString("host"),
             port = json.getInt("port"),
             lastConnectedAtMillis = json.optLong("lastConnectedAt"),
+            lastMeasuredBitsPerSecond = json.optLong("lastMeasuredBps").takeIf { it > 0 },
         )
     }.onFailure { log.w("Discarding an unreadable saved Target", it) }.getOrNull()
 

@@ -37,13 +37,18 @@ class ScrcpyServerAsset(private val context: Context) {
      * which otherwise surfaces on the Target as an opaque `ClassNotFoundException`
      * inside `app_process`.
      */
+    /** The SHA-256 of the bundled jar, as computed at build time. */
+    suspend fun expectedSha256(): String = withContext(Dispatchers.IO) {
+        context.assets.open(SHA256_ASSET_NAME)
+            .use { it.readBytes() }
+            .toString(Charsets.UTF_8)
+            .trim()
+            .lowercase()
+    }
+
     suspend fun extract(): Result<File> = withContext(Dispatchers.IO) {
         runCatching {
-            val expected = context.assets.open(SHA256_ASSET_NAME)
-                .use { it.readBytes() }
-                .toString(Charsets.UTF_8)
-                .trim()
-                .lowercase()
+            val expected = expectedSha256()
 
             if (cachedJar.isFile && sha256(cachedJar) == expected) {
                 log.d("Reusing extracted scrcpy server at ${cachedJar.absolutePath}")

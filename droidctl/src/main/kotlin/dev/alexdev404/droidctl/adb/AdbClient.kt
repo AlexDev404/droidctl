@@ -204,6 +204,16 @@ class AdbClient(
         }
     }
 
+    /** `adb -s <serial> shell <command>`, one-shot. */
+    suspend fun shell(serial: String, command: String): Result<String> {
+        val result = shell.run(binary, AdbCommand.of("-s", serial, "shell", command))
+        return if (result.isSuccess) {
+            Result.success(result.stdoutText)
+        } else {
+            Result.failure(result.asException("`adb shell $command` failed on $serial"))
+        }
+    }
+
     /**
      * The Target's display size in pixels, via `adb shell wm size`.
      *
