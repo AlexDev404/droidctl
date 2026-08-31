@@ -272,7 +272,10 @@ class MirrorSession(
             // Only pushed when the Target does not already have this exact jar.
             // When it is pushed, the transfer doubles as the bandwidth probe --
             // it is the only sizeable transfer before the video stream exists.
-            val delivery = launcher.ensureServerOnTarget(target.serial).getOrElse { error ->
+            val delivery = launcher.ensureServerOnTarget(
+                serial = target.serial,
+                allowSkip = !settings.alwaysPushServer,
+            ).getOrElse { error ->
                 failLocked("push-server", error, serverOutputLines())
                 return
             }

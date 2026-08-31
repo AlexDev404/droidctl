@@ -1,5 +1,6 @@
 package dev.alexdev404.droidctl.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -49,6 +50,18 @@ fun DroidCtlApp(container: AppContainer) {
         }
     }
 
+    // Back moves up the hierarchy rather than out of the app. The mirror screen
+    // handles its own, because the debug pane there is an overlay it owns.
+    BackHandler(enabled = screen !is Screen.Connect && screen !is Screen.Mirror) {
+        screen = when (screen) {
+            is Screen.Licenses -> Screen.Settings
+            is Screen.DebugPane -> Screen.Settings
+            is Screen.Settings -> Screen.Connect
+            is Screen.Pairing -> Screen.Connect
+            else -> Screen.Connect
+        }
+    }
+
     when (val current = screen) {
         is Screen.Gate -> FirstRunGateScreen(
             checking = checking,
@@ -88,6 +101,7 @@ fun DroidCtlApp(container: AppContainer) {
                 // bit rate and size, so wait for the first read.
                 settings == null -> Unit
                 else -> MirrorScreen(
+                    container = container,
                     session = session,
                     target = current.target,
                     settings = settings!!,
@@ -95,7 +109,6 @@ fun DroidCtlApp(container: AppContainer) {
                     // stops the session. Stopping here as well would queue a
                     // second teardown racing the next start.
                     onExit = { screen = Screen.Connect },
-                    onDebugPane = { screen = Screen.DebugPane },
                 )
             }
         }

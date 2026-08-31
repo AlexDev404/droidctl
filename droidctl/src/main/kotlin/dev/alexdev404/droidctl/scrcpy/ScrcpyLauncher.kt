@@ -88,26 +88,28 @@ class ScrcpyLauncher(
      * know when the session is over).
      */
     /**
-     * Makes sure the Target has the right server jar, pushing it only if it does
-     * not already.
+     * Makes sure the Target has the right server jar.
      *
-     * Re-sending three quarters of a megabyte at the start of every session is
-     * most of the wait on a slow link -- nearly half a minute at 256 kbps, every
-     * single time -- so the Target's copy is checksummed first and left alone
-     * when it matches. Comparing digests rather than sizes or timestamps means a
-     * jar left behind by a different scrcpy version is still replaced; a
-     * mismatched server aborts at startup with an error that reads like a
-     * protocol bug.
+     * Pushed every session by default, because the push is the only sizeable
+     * transfer before the video stream exists and so the only thing Automatic
+     * can measure the link with. Re-sending three quarters of a megabyte costs
+     * nearly half a minute at 256 kbps, so [allowSkip] lets the user trade that
+     * measurement for a much faster connect: the Target's copy is checksummed
+     * and left alone when it matches. Comparing digests rather than sizes means
+     * a jar from a different scrcpy version is still replaced; a mismatched
+     * server aborts at startup with an error that reads like a protocol bug.
      *
      * Separate from [launch] because the quality rung is decided between the
      * two: a push is what measures the link, and `max_size` and `video_bit_rate`
      * are both fixed the moment the server starts.
      */
-    suspend fun ensureServerOnTarget(serial: String): Result<ServerDelivery> {
+    suspend fun ensureServerOnTarget(
+        serial: String,
+        allowSkip: Boolean,
+    ): Result<ServerDelivery> {
         val jar = asset.extract().getOrElse { return Result.failure(it) }
-        val expected = asset.expectedSha256()
 
-        if (targetHasServer(serial, expected)) {
+        if (allowSkip && targetHasServer(serial, asset.expectedSha256())) {
             log.i("The Target already has this scrcpy server; skipping the push")
             return Result.success(ServerDelivery.AlreadyPresent)
         }

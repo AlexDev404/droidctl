@@ -90,7 +90,17 @@ fun SettingsScreen(
                     selected = settings.qualityMode,
                     onSelect = { mode -> update { it.copy(qualityMode = mode) } },
                 )
-                Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(8.dp))
+                SwitchRow(
+                    title = "Re-send the server every session",
+                    subtitle = "The upload is what Automatic times to measure your connection, " +
+                        "so leaving this on keeps its estimate current. Turn it off to connect " +
+                        "much faster on a slow link, at the cost of Automatic reusing the last " +
+                        "measurement instead of taking a new one.",
+                    checked = settings.alwaysPushServer,
+                    onChange = { value -> update { it.copy(alwaysPushServer = value) } },
+                )
+                Spacer(Modifier.height(4.dp))
                 NumberField(
                     label = "Max FPS (0 = unlimited)",
                     value = settings.maxFps,

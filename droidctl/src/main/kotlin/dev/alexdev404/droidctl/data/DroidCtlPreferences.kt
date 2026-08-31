@@ -40,6 +40,15 @@ data class MirrorSettings(
      * display when it exits, including when the Host disappears abruptly.
      */
     val turnScreenOff: Boolean = false,
+    /**
+     * Send the server jar every session, even when the Target already has it.
+     *
+     * On by default, because the push is what Automatic measures the link with.
+     * Skipping it makes connecting much faster on a slow link, at the cost of
+     * Automatic having only an old figure to go on -- which is why this is the
+     * user's call and not an optimisation applied behind their back.
+     */
+    val alwaysPushServer: Boolean = true,
     /** Dump the raw post-header payload stream to a file instead of decoding it. */
     val rawDumpEnabled: Boolean = false,
     /** Debug builds only: route the connection layer at the bundled fake server. */
@@ -76,6 +85,7 @@ class DroidCtlPreferences(private val context: Context) {
             stayAwake = prefs[KEY_STAY_AWAKE] ?: false,
             showTouches = prefs[KEY_SHOW_TOUCHES] ?: false,
             turnScreenOff = prefs[KEY_TURN_SCREEN_OFF] ?: false,
+            alwaysPushServer = prefs[KEY_ALWAYS_PUSH] ?: true,
             rawDumpEnabled = prefs[KEY_RAW_DUMP] ?: false,
             useFakeServer = prefs[KEY_FAKE_SERVER] ?: false,
         )
@@ -147,6 +157,7 @@ class DroidCtlPreferences(private val context: Context) {
             prefs[KEY_STAY_AWAKE] = next.stayAwake
             prefs[KEY_SHOW_TOUCHES] = next.showTouches
             prefs[KEY_TURN_SCREEN_OFF] = next.turnScreenOff
+            prefs[KEY_ALWAYS_PUSH] = next.alwaysPushServer
             prefs[KEY_RAW_DUMP] = next.rawDumpEnabled
             prefs[KEY_FAKE_SERVER] = next.useFakeServer
         }
@@ -213,6 +224,7 @@ class DroidCtlPreferences(private val context: Context) {
         val KEY_STAY_AWAKE = booleanPreferencesKey("stay_awake")
         val KEY_SHOW_TOUCHES = booleanPreferencesKey("show_touches")
         val KEY_TURN_SCREEN_OFF = booleanPreferencesKey("turn_screen_off")
+        val KEY_ALWAYS_PUSH = booleanPreferencesKey("always_push_server")
         val KEY_RAW_DUMP = booleanPreferencesKey("raw_dump")
         val KEY_FAKE_SERVER = booleanPreferencesKey("use_fake_server")
     }

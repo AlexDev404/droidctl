@@ -2,6 +2,7 @@ package dev.alexdev404.droidctl.ui.mirror
 
 import android.view.View
 import android.view.ViewGroup
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -48,12 +49,14 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import dev.alexdev404.droidctl.AppContainer
 import dev.alexdev404.droidctl.data.MirrorSettings
 import dev.alexdev404.droidctl.input.KeyMapper
 import dev.alexdev404.droidctl.model.KnownTarget
 import dev.alexdev404.droidctl.session.MirrorSession
 import dev.alexdev404.droidctl.session.SessionState
 import dev.alexdev404.droidctl.ui.common.MonospaceBlock
+import dev.alexdev404.droidctl.ui.settings.DebugPaneScreen
 
 /**
  * The mirror.
@@ -65,17 +68,22 @@ import dev.alexdev404.droidctl.ui.common.MonospaceBlock
  */
 @Composable
 fun MirrorScreen(
+    container: AppContainer,
     session: MirrorSession,
     target: KnownTarget,
     settings: MirrorSettings,
     onExit: () -> Unit,
-    onDebugPane: () -> Unit,
 ) {
     val state by session.state.collectAsState()
     val stats by session.decoderStats.collectAsState()
     val view = LocalView.current
 
     var controlsVisible by remember { mutableStateOf(false) }
+    // An overlay rather than a destination of its own. Navigating away from the
+    // mirror disposes this screen, and its DisposableEffect stops the session --
+    // so opening the debug pane as a separate screen tore down the very session
+    // it exists to explain.
+    var debugVisible by remember { mutableStateOf(false) }
     var keyboardVisible by remember { mutableStateOf(false) }
     var batteryWarningShown by remember { mutableStateOf(false) }
 
@@ -163,7 +171,7 @@ fun MirrorScreen(
                 onPower = { session.send(KeyMapper.power()) },
                 onRotate = { session.send(KeyMapper.rotate()) },
                 onKeyboard = { keyboardVisible = !keyboardVisible },
-                onDebug = onDebugPane,
+                onDebug = { debugVisible = true },
                 onExit = onExit,
                 modifier = Modifier.align(Alignment.BottomCenter),
             )
@@ -172,6 +180,18 @@ fun MirrorScreen(
         if (!batteryWarningShown && state is SessionState.Streaming) {
             BatteryNotice(onDismiss = { batteryWarningShown = true })
         }
+
+        if (debugVisible) {
+            Surface(Modifier.fillMaxSize()) {
+                DebugPaneScreen(container = container, onBack = { debugVisible = false })
+            }
+        }
+    }
+
+    // Back closes the debug pane if it is open, and otherwise leaves the mirror.
+    // Without this, back from the mirror screen exits the app outright.
+    BackHandler(enabled = true) {
+        if (debugVisible) debugVisible = false else onExit()
     }
 }
 

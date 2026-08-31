@@ -138,7 +138,8 @@ where each touch actually landed.
 | 7b.3 | Pick **Automatic** on good Wi-Fi and mirror | The log shows `Automatic quality: ... -> <rung>`, and the debug pane's "Measured at connect" is plausible for your network | `DroidCtl/Session` |
 | 7b.4 | Compare the debug pane's "Target screen" against the Target's real resolution | They match (`wm size` was read correctly) | `DroidCtl/Session` |
 | 7b.5 | Move the Host far from the access point, or throttle the network, then mirror on Automatic | A lower rung is chosen than in 7b.3, provided the server is re-pushed (see 7b.7) | `DroidCtl/Session` |
-| 7b.7 | Mirror twice in a row and compare the logs | The second run logs "The Target already has this scrcpy server; skipping the push" and reaches video markedly faster. Automatic reports the rung as measured "on an earlier session" | `DroidCtl/ScrcpyServer` |
+| 7b.7 | Mirror twice in a row with the default settings | Both runs push the server and both log a fresh measurement — Automatic re-measures every session | `DroidCtl/ScrcpyServer` |
+| 7b.7a | Turn off "Re-send the server every session", then mirror twice | The second run logs "The Target already has this scrcpy server; skipping the push", reaches video markedly faster, and reports the rung as measured "on an earlier session" | `DroidCtl/ScrcpyServer` |
 | 7b.8 | With a fixed rung selected, mirror and read the log | Exactly one quality line, reading "chosen in settings, not measured". No push timing is used | `DroidCtl/Session` |
 | 7b.9 | On a slow link, watch the progress text while connecting | It moves through "Delivering the scrcpy server", "Reading the Target's screen size" and "Starting the scrcpy server" rather than sitting on one label | — |
 | 7b.6 | Watch the debug pane's "Video throughput" on a busy screen, then a static one | Rises with motion, falls to near zero when nothing moves | — |
@@ -157,6 +158,16 @@ Reconnect to re-measure.
 | 7c.3 | Press the Target's physical power button | It stays off (the server keeps re-blanking it) |
 | 7c.4 | Stop mirroring | The Target's screen comes back on |
 | 7c.5 | Mirror again, then kill DroidCtl from the recents screen | The Target's screen still comes back — the server's CleanUp restores it even on an abrupt disconnection |
+
+## 7d. Navigation
+
+| # | Do this | Expect |
+|---|---|---|
+| 7d.1 | While mirroring, open the debug pane from the overlay controls | It covers the mirror. The session keeps running — frames decoded keeps climbing while it is open |
+| 7d.2 | Press back | The debug pane closes and mirroring is still live, at the same session (same scid), not restarted |
+| 7d.3 | Press back again | Mirroring stops and you land on the connect screen, not on the launcher |
+| 7d.4 | From Settings → Open the debug pane, press back | Back to Settings |
+| 7d.5 | From Settings → Open source licenses, press back | Back to Settings; back again returns to the connect screen |
 
 ## 8. Buttons, keys and text
 

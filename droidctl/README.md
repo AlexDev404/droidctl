@@ -67,13 +67,13 @@ Automatic measures the link by **timing the `scrcpy-server.jar` push**, which
 has to happen anyway: no extra traffic and no added delay. It then picks the
 best rung whose bit rate fits inside 60% of the measurement.
 
-The jar is only pushed when the Target does not already have a byte-identical
-copy — its SHA-256 is checked first. That matters most on exactly the links
-Automatic exists for: re-sending three quarters of a megabyte costs nearly half
-a minute at 256 kbps, every session. When the push is skipped there is nothing
-to time, so the figure from the last real push to that Target is remembered and
-reused. It is therefore only refreshed when the bundled server version changes;
-if the network has changed since, pick a rung by hand. The margin covers
+The jar is pushed every session by default, which is what keeps Automatic's
+measurement current. On a slow link that costs real time — three quarters of a
+megabyte is nearly half a minute at 256 kbps — so **Re-send the server every
+session** can be turned off in settings: the Target's copy is checksummed and
+left alone when it matches, and Automatic falls back to the figure remembered
+from the last real push to that Target. That is a trade the user makes
+knowingly, not an optimisation applied behind their back. The margin covers
 what the push does not measure — it runs Host to Target while video runs the
 other way, and an encoder treats its bit rate as an average it overshoots on
 scene changes. A push too brief to time is treated as a fast link, not a slow
