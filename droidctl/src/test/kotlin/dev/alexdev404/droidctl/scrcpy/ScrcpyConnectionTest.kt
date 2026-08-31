@@ -28,6 +28,14 @@ class ScrcpyConnectionTest {
 
     private var tunnel: FakeTunnel? = null
 
+    /** Short everywhere, so a test that must wait one out finishes promptly. */
+    private val quick = HandshakeTimeouts(
+        connectTimeoutMs = 1_000,
+        dummyByteTimeoutMs = 400,
+        serverStartupBudgetMs = 3_000,
+        retryDelayMs = 50,
+    )
+
     @After
     fun tearDown() {
         tunnel?.close()
@@ -38,7 +46,7 @@ class ScrcpyConnectionTest {
         val fake = FakeTunnel(refusalsBeforeReady = 0).also { tunnel = it; it.start() }
 
         val connection = runBlocking {
-            ScrcpyConnection.open(fake.port, scid = "scrcpy_00000001") { "" }
+            ScrcpyConnection.open(fake.port, scid = "scrcpy_00000001", timeouts = quick) { "" }
         }.getOrThrow()
 
         assertEquals("Pixel Test", connection.meta.deviceName)
@@ -57,15 +65,18 @@ class ScrcpyConnectionTest {
 
         val elapsed = System.nanoTime()
         val connection = runBlocking {
-            ScrcpyConnection.open(fake.port, scid = "scrcpy_00000002") { "" }
+            ScrcpyConnection.open(fake.port, scid = "scrcpy_00000002", timeouts = quick) { "" }
         }.getOrThrow()
         val elapsedMs = (System.nanoTime() - elapsed) / 1_000_000
 
         assertEquals("Pixel Test", connection.meta.deviceName)
         assertEquals(1080, connection.meta.width)
-        // Three retries at 100 ms apart; anything faster means the retry loop
-        // gave up on the first end of stream instead of waiting for the server.
-        assertTrue("expected at least three retries, took only ${elapsedMs}ms", elapsedMs >= 300)
+        // Three retries at the configured delay apart; anything faster means the
+        // loop gave up on the first end of stream instead of waiting.
+        assertTrue(
+            "expected at least three retries, took only ${elapsedMs}ms",
+            elapsedMs >= 3 * quick.retryDelayMs,
+        )
         assertEquals(4, fake.acceptedVideoConnections)
         connection.close()
     }
@@ -79,7 +90,11 @@ class ScrcpyConnectionTest {
 
         val started = System.nanoTime()
         val error = runBlocking {
-            ScrcpyConnection.open(fake.port, scid = "scrcpy_00000003") { "some server output" }
+            ScrcpyConnection.open(
+                fake.port,
+                scid = "scrcpy_00000003",
+                timeouts = quick,
+            ) { "some server output" }
         }.exceptionOrNull()
         val elapsedMs = (System.nanoTime() - started) / 1_000_000
 
@@ -89,6 +104,51 @@ class ScrcpyConnectionTest {
         // almost never the actual explanation.
         assertTrue(error.message!!.contains("some server output"))
         assertTrue("should not have retried, took ${elapsedMs}ms", elapsedMs < 2_000)
+    }
+
+    @Test
+    fun `a server that reaches us but is slow to answer is not retried`() {
+        // Reaching the server means it has already spent its video accept on
+        // this socket. Reconnecting would be handed the *control* accept, which
+        // sends no dummy byte, so every later attempt times out too and the
+        // failure ends up blaming the server for never listening -- exactly the
+        // one thing that is not true by then.
+        val fake = FakeTunnel(refusalsBeforeReady = 0, withholdFirstByte = true)
+            .also { tunnel = it; it.start() }
+
+        val error = runBlocking {
+            ScrcpyConnection.open(fake.port, scid = "scrcpy_00000004", timeouts = quick) {
+                "server was still starting"
+            }
+        }.exceptionOrNull()
+
+        assertTrue(error is java.io.IOException)
+        assertTrue(
+            "should name the real problem, not blame the server for not listening: ${error!!.message}",
+            error.message!!.contains("did not arrive within"),
+        )
+        assertTrue(error.message!!.contains("server was still starting"))
+        assertEquals(
+            "must not spend a second connection on a server it already reached",
+            1,
+            fake.acceptedVideoConnections,
+        )
+    }
+
+    @Test
+    fun `a server that never comes up is reported as never listening`() {
+        // Nothing ever accepts on the abstract socket, so every attempt ends at
+        // end of stream. That one *is* safe to retry, and the verdict is right.
+        val fake = FakeTunnel(refusalsBeforeReady = Int.MAX_VALUE)
+            .also { tunnel = it; it.start() }
+
+        val error = runBlocking {
+            ScrcpyConnection.open(fake.port, scid = "scrcpy_00000005", timeouts = quick) { "" }
+        }.exceptionOrNull()
+
+        assertTrue(error is java.io.IOException)
+        assertTrue(error!!.message!!.contains("never started listening"))
+        assertTrue("should have retried more than once", fake.acceptedVideoConnections > 1)
     }
 
     /**
@@ -103,6 +163,8 @@ class ScrcpyConnectionTest {
     private class FakeTunnel(
         private val refusalsBeforeReady: Int,
         private val firstByte: Int = 0,
+        /** Accept the video socket but never send its first byte, as a slow link would. */
+        private val withholdFirstByte: Boolean = false,
     ) : Closeable {
         private val server = ServerSocket(0, 50, InetAddress.getLoopbackAddress())
         private val open = mutableListOf<Socket>()
@@ -124,6 +186,12 @@ class ScrcpyConnectionTest {
                 }
 
                 val video = server.accept().also { open += it; acceptedVideoConnections++ }
+                if (withholdFirstByte) {
+                    // Hold the socket open and silent; the client must not treat
+                    // this as a reason to open another one.
+                    while (!server.isClosed) Thread.sleep(20)
+                    return
+                }
                 video.getOutputStream().apply {
                     write(firstByte)
                     flush()

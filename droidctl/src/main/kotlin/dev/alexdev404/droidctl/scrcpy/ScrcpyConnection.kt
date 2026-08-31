@@ -11,6 +11,7 @@ import java.io.DataInputStream
 import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.net.SocketTimeoutException
 import java.nio.charset.StandardCharsets
 import kotlin.coroutines.coroutineContext
 
@@ -57,21 +58,8 @@ class ScrcpyConnection private constructor(
         /** `DesktopConnection.DEVICE_NAME_FIELD_LENGTH`. */
         private const val DEVICE_NAME_FIELD_LENGTH = 64
 
-        /** Matches the reference client: 100 attempts, 100 ms apart. */
-        private const val CONNECT_ATTEMPTS = 100
-        private const val CONNECT_RETRY_DELAY_MS = 100L
-
-        /** Short: adb is already listening, so this connect either works at once or not at all. */
-        private const val CONNECT_TIMEOUT_MS = 2_000
-
-        /**
-         * The server writes the dummy byte the instant it accepts, so waiting
-         * long here only delays the next retry.
-         */
-        private const val DUMMY_BYTE_TIMEOUT_MS = 1_000
-
         /** Generous, but bounded: the handshake must not hang the UI forever. */
-        private const val HANDSHAKE_TIMEOUT_MS = 10_000
+        private const val HANDSHAKE_TIMEOUT_MS = 30_000
 
         /**
          * Connects both sockets and reads the handshake.
@@ -89,13 +77,14 @@ class ScrcpyConnection private constructor(
         suspend fun open(
             hostPort: Int,
             scid: String,
+            timeouts: HandshakeTimeouts = HandshakeTimeouts(),
             serverDiagnostics: () -> String,
         ): Result<ScrcpyConnection> = withContext(Dispatchers.IO) {
             val scoped = log.withScid(scid)
             var video: Socket? = null
             var control: Socket? = null
             try {
-                video = connectWithRetry(hostPort, scoped, serverDiagnostics)
+                video = connectWithRetry(hostPort, scoped, timeouts, serverDiagnostics)
                     .getOrElse { return@withContext Result.failure(it) }
 
                 control = Socket().apply {
@@ -151,42 +140,64 @@ class ScrcpyConnection private constructor(
          * `localabstract:scrcpy_<scid>` on the Target that it closes the
          * connection again. So a connect that "worked" proves nothing, and the
          * end of stream on the next read is the actual "not up yet" signal.
-         * This is exactly what the reference client's `connect_and_read_byte`
-         * does, retried by `connect_to_server`.
+         *
+         * The two ways an attempt can fail are **not** equivalent, and treating
+         * them alike is what made this unreliable on a slow link:
+         *
+         *  - **End of stream.** adb could not reach the abstract socket, so the
+         *    server has accepted nothing. Retrying is safe, and is the whole
+         *    point of the loop.
+         *  - **Read timeout.** The connection reached the server, which means it
+         *    has *already accepted this socket as its video socket* and written
+         *    the dummy byte -- the byte is merely still in flight. Abandoning
+         *    the socket burns the server's one and only video accept: the next
+         *    attempt is accepted as the *control* socket, which sends no dummy
+         *    byte, so it times out too, and once both accepts are spent the
+         *    server closes its listener and every later attempt fails. The loop
+         *    then blames the server for never listening, which by then is the
+         *    one thing that is definitely not true.
+         *
+         * So a timeout ends the handshake rather than retrying it. The caller
+         * tears the session down and starts a new one with a fresh scid, which
+         * is the only way back to a server whose accepts are unspent.
          */
         private suspend fun connectWithRetry(
             hostPort: Int,
             scoped: DroidCtlLog,
+            timeouts: HandshakeTimeouts,
             serverDiagnostics: () -> String,
         ): Result<Socket> {
             var lastFailure = "no connection was attempted"
-            repeat(CONNECT_ATTEMPTS) { attempt ->
+            var attempt = 0
+            val startedAt = System.nanoTime()
+
+            fun elapsedMs() = (System.nanoTime() - startedAt) / 1_000_000
+
+            while (elapsedMs() < timeouts.serverStartupBudgetMs) {
                 coroutineContext.ensureActive()
+                attempt++
                 val socket = Socket()
                 try {
                     socket.tcpNoDelay = true
-                    socket.connect(InetSocketAddress("127.0.0.1", hostPort), CONNECT_TIMEOUT_MS)
-                    socket.soTimeout = DUMMY_BYTE_TIMEOUT_MS
+                    socket.connect(
+                        InetSocketAddress("127.0.0.1", hostPort),
+                        timeouts.connectTimeoutMs,
+                    )
+                    socket.soTimeout = timeouts.dummyByteTimeoutMs
 
                     when (val dummy = socket.getInputStream().read()) {
                         0 -> {
-                            scoped.d("Dummy byte received on attempt ${attempt + 1}; the tunnel is live")
+                            scoped.d("Dummy byte received on attempt $attempt; the tunnel is live")
                             socket.soTimeout = HANDSHAKE_TIMEOUT_MS
                             return Result.success(socket)
                         }
 
                         -1 ->
-                            // adb accepted us and then hung up: the forward is
-                            // in place but nothing is listening on the Target's
-                            // abstract socket yet. The normal case while the
-                            // server is still starting.
+                            // The server is not listening yet. Safe to retry.
                             lastFailure = "the adb tunnel accepted the connection and closed it " +
                                 "immediately; nothing is listening on localabstract yet"
 
                         else -> {
-                            // A byte that is not 0x00 is not a "not ready" signal,
-                            // it means we are talking to something that is not the
-                            // scrcpy server. Retrying cannot help.
                             runCatching { socket.close() }
                             return Result.failure(
                                 IOException(
@@ -198,22 +209,36 @@ class ScrcpyConnection private constructor(
                             )
                         }
                     }
+                } catch (e: SocketTimeoutException) {
+                    runCatching { socket.close() }
+                    return Result.failure(
+                        IOException(
+                            "Reached the scrcpy server through the adb tunnel, but its first byte " +
+                                "did not arrive within ${timeouts.dummyByteTimeoutMs} ms. On a very " +
+                                "slow link the byte may still have been in flight. Retrying here " +
+                                "would spend the server's video connection and desynchronise the " +
+                                "rest of the handshake, so the session is restarted instead. " +
+                                "Server output:\n" +
+                                serverDiagnostics().ifBlank { "(the server printed nothing)" },
+                            e,
+                        )
+                    )
                 } catch (e: IOException) {
                     lastFailure = e.toString()
                 }
                 runCatching { socket.close() }
-                if (attempt == 0 || attempt % 10 == 9) {
+                if (attempt == 1 || attempt % 10 == 0) {
                     scoped.d(
-                        "Waiting for the scrcpy server " +
-                            "(attempt ${attempt + 1}/$CONNECT_ATTEMPTS): $lastFailure"
+                        "Waiting for the scrcpy server (attempt $attempt, " +
+                            "${elapsedMs()} of ${timeouts.serverStartupBudgetMs} ms): $lastFailure"
                     )
                 }
-                delay(CONNECT_RETRY_DELAY_MS)
+                delay(timeouts.retryDelayMs)
             }
             return Result.failure(
                 IOException(
                     "The scrcpy server never started listening on 127.0.0.1:$hostPort after " +
-                        "${CONNECT_ATTEMPTS * CONNECT_RETRY_DELAY_MS} ms. Last failure: " +
+                        "${timeouts.serverStartupBudgetMs} ms and $attempt attempts. Last failure: " +
                         "$lastFailure. Server output:\n" +
                         serverDiagnostics().ifBlank { "(the server printed nothing)" }
                 )
