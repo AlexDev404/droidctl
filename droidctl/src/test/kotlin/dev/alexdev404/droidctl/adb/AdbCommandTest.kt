@@ -23,7 +23,26 @@ class AdbCommandTest {
         // Without a writable HOME, adb regenerates its key every run and the
         // Target re-prompts for authorization every session.
         assertTrue(line.startsWith("HOME='${AdbBinary.DEFAULT_HOME}' TMPDIR='${AdbBinary.DEFAULT_TMP}'"))
-        assertTrue(line.endsWith("'/system/xbin/adb' 'devices' '-l'"))
+        assertTrue(line.contains("'/system/xbin/adb' 'devices' '-l'"))
+    }
+
+    @Test
+    fun `every command reads stdin from dev null`() {
+        // `adb shell` forwards its stdin to the remote process. Run in the
+        // foreground on libsu's shared shell that stdin is the pipe libsu writes
+        // commands into, so adb swallows the completion marker libsu is waiting
+        // for: the command never returns, the shell's mutex is never released,
+        // and every later adb call queues behind it forever.
+        for (command in listOf(
+            AdbCommand.of("devices", "-l"),
+            AdbCommand.of("-s", "1.2.3.4:5555", "shell", "wm size"),
+            AdbCommand.of("-s", "1.2.3.4:5555", "push", "/a/b", "/c/d"),
+        )) {
+            assertTrue(
+                "$command must not inherit the shell's stdin",
+                command.toShellLine(binary).endsWith(" < /dev/null"),
+            )
+        }
     }
 
     @Test

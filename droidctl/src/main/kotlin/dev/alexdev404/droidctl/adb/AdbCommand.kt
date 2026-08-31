@@ -32,6 +32,14 @@ class AdbCommand private constructor(
      * bare `adb` binary they are what let it persist its `adbkey`. Without a
      * writable `HOME`, adb regenerates its key every run and the Target
      * re-prompts for authorization on every single session.
+     *
+     * **stdin is always `/dev/null`.** `adb shell` forwards its own stdin to the
+     * remote process, so run in the foreground it reads from the very pipe libsu
+     * feeds the shell its commands through -- and swallows the completion marker
+     * libsu is waiting for. The command then never returns, the shared shell's
+     * mutex is never released, and every later adb call queues behind it
+     * forever. The long-lived server launch escapes this only by accident, being
+     * backgrounded with `&`, which POSIX sh already redirects from `/dev/null`.
      */
     fun toShellLine(binary: AdbBinary): String = buildString {
         append("HOME=").append(quote(binary.homeDir))
@@ -40,6 +48,7 @@ class AdbCommand private constructor(
         for (arg in args) {
             append(' ').append(quote(arg))
         }
+        append(" < /dev/null")
     }
 
     /** A redacted, human-readable rendering. Safe to log. */

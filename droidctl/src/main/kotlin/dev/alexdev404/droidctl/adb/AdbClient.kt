@@ -195,6 +195,7 @@ class AdbClient(
         val result = shell.run(
             binary,
             AdbCommand.of("-s", serial, "push", local.absolutePath, remote),
+            timeoutMs = RootShellSession.TRANSFER_TIMEOUT_MS,
         )
         return if (result.isSuccess) {
             log.i("Pushed ${local.name} (${local.length()} bytes) to $serial:$remote")

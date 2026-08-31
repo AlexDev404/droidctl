@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -41,20 +42,46 @@ class RootShellSession {
     }
 
     /** Runs [command] on the shared root shell and returns its raw result. */
-    suspend fun run(binary: AdbBinary, command: AdbCommand): AdbResult =
-        runRaw(command.toShellLine(binary), command)
+    suspend fun run(
+        binary: AdbBinary,
+        command: AdbCommand,
+        timeoutMs: Long = DEFAULT_COMMAND_TIMEOUT_MS,
+    ): AdbResult = runRaw(command.toShellLine(binary), command, timeoutMs)
 
-    /** Runs a raw `sh` line on the shared root shell. Used for binary discovery. */
-    suspend fun runRaw(line: String, command: AdbCommand): AdbResult =
-        withContext(Dispatchers.IO) {
-            mutex.withLock {
-                log.d("exec: $command")
-                val out = ArrayList<String>()
-                val err = ArrayList<String>()
-                val result = Shell.cmd(line).to(out, err).exec()
+    /**
+     * Runs a raw `sh` line on the shared root shell.
+     *
+     * Bounded by [timeoutMs] as a backstop. A command that never returns holds
+     * the shell's mutex for good and silently wedges every adb call after it,
+     * which presents as an app frozen mid-connect with nothing in the log. A
+     * timeout cannot unblock libsu's thread, so the shell stays unusable -- but
+     * the user gets told, instead of watching a spinner forever.
+     */
+    suspend fun runRaw(
+        line: String,
+        command: AdbCommand,
+        timeoutMs: Long = DEFAULT_COMMAND_TIMEOUT_MS,
+    ): AdbResult = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            log.d("exec: $command")
+            val out = ArrayList<String>()
+            val err = ArrayList<String>()
+            val result = withTimeoutOrNull(timeoutMs) {
+                Shell.cmd(line).to(out, err).exec()
+            }
+            if (result == null) {
+                log.e("$command did not return within ${timeoutMs}ms; the root shell is stuck")
+                AdbResult(
+                    command,
+                    exitCode = TIMED_OUT,
+                    stdout = out.toList(),
+                    stderr = err.toList() + "DroidCtl: timed out after ${timeoutMs}ms",
+                )
+            } else {
                 AdbResult(command, result.code, out.toList(), err.toList())
             }
         }
+    }
 
     /**
      * Starts a long-lived command (the `app_process` invocation that runs the
@@ -83,6 +110,21 @@ class RootShellSession {
         const val SHELL_FLAGS = Shell.FLAG_MOUNT_MASTER
 
         const val SHELL_TIMEOUT_SECONDS = 20L
+
+        /** Generous: adb talks to a device over the network, not a local pipe. */
+        const val DEFAULT_COMMAND_TIMEOUT_MS = 60_000L
+
+        /**
+         * For transfers, which are only bounded by the link.
+         *
+         * Three quarters of a megabyte takes about half a minute at 256 kbps and
+         * far longer on something worse, so this only has to be long enough that
+         * it never fires on a link anyone would actually mirror over.
+         */
+        const val TRANSFER_TIMEOUT_MS = 15 * 60_000L
+
+        /** [AdbResult.exitCode] when the command never returned. */
+        const val TIMED_OUT = -1
     }
 }
 
