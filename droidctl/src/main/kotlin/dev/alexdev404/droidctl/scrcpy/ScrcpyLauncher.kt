@@ -24,6 +24,38 @@ class ScrcpyServerHandle(
 }
 
 /**
+ * What pushing the server jar revealed about the link.
+ *
+ * The push is the one sizeable transfer that happens before the video stream
+ * exists, so it doubles as the bandwidth probe: no extra traffic, and no delay
+ * added to a launch that had to push the jar anyway.
+ *
+ * Two honest caveats, both accounted for by [ConnectionQuality.HEADROOM]:
+ * it measures Host to Target while video travels the other way, and a very fast
+ * link finishes so quickly that adb's own overhead dominates the number.
+ */
+data class PushMeasurement(
+    val bytes: Long,
+    val elapsedMs: Long,
+) {
+    val bitsPerSecond: Long
+        get() = if (elapsedMs <= 0) 0 else bytes * 8 * 1_000 / elapsedMs
+
+    /**
+     * False when the transfer was too brief for the timing to mean anything;
+     * the link is certainly fast, but the figure itself is mostly overhead.
+     */
+    val isMeaningful: Boolean get() = elapsedMs >= MIN_MEANINGFUL_MS
+
+    override fun toString(): String =
+        "$bytes bytes in ${elapsedMs}ms (${bitsPerSecond / 1000} kbps)"
+
+    companion object {
+        const val MIN_MEANINGFUL_MS = 150L
+    }
+}
+
+/**
  * Starts the scrcpy server on the Target and sets up the tunnel to it.
  *
  * The launch sequence mirrors the reference client (`app/src/server.c`):
@@ -43,10 +75,31 @@ class ScrcpyLauncher(
      * teardown path and must remove the forward itself (the launcher does not
      * know when the session is over).
      */
+    /**
+     * Pushes the server jar and times the transfer.
+     *
+     * Separate from [launch] because the quality rung has to be decided between
+     * the two: the push is what measures the link, and `max_size` and
+     * `video_bit_rate` are fixed the moment the server starts.
+     */
+    suspend fun pushServer(serial: String): Result<PushMeasurement> {
+        val jar = asset.extract().getOrElse { return Result.failure(it) }
+        val startedAt = System.nanoTime()
+        adb.push(serial, jar, ScrcpyOptions.DEVICE_SERVER_PATH)
+            .getOrElse { return Result.failure(it) }
+        val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000
+        val measurement = PushMeasurement(jar.length(), elapsedMs)
+        log.i("Pushed the scrcpy server: $measurement")
+        return Result.success(measurement)
+    }
+
+    /**
+     * Opens the tunnel and starts `app_process`.
+     *
+     * Expects [pushServer] to have run already.
+     */
     suspend fun launch(serial: String, options: ScrcpyOptions): Result<ScrcpyServerHandle> {
         val scoped = log.withScid(options.socketName)
-
-        asset.pushTo(adb, serial).getOrElse { return Result.failure(it) }
 
         val hostPort = openForward(serial, options, scoped).getOrElse { return Result.failure(it) }
 

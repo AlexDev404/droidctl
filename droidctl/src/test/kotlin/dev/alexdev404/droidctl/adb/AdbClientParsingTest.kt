@@ -69,6 +69,36 @@ class AdbClientParsingTest {
     }
 
     @Test
+    fun `reads the Target's physical display size`() {
+        val size = AdbClient.parseDisplaySize(listOf("Physical size: 1080x2400"))
+        assertEquals(DisplaySize(1080, 2400), size)
+        assertEquals(2400, size!!.longerSide)
+    }
+
+    @Test
+    fun `an override size wins over the physical one`() {
+        // The override is the resolution the Target is actually running at, so
+        // it is what scrcpy captures and what a quality rung is a fraction of.
+        val size = AdbClient.parseDisplaySize(
+            listOf("Physical size: 1440x3120", "Override size: 1080x2340")
+        )
+        assertEquals(DisplaySize(1080, 2340), size)
+    }
+
+    @Test
+    fun `a landscape Target reports its longer side correctly`() {
+        val size = AdbClient.parseDisplaySize(listOf("Physical size: 2560x1600"))!!
+        assertEquals(2560, size.longerSide)
+    }
+
+    @Test
+    fun `unparseable wm size output is reported as unknown`() {
+        assertNull(AdbClient.parseDisplaySize(listOf("")))
+        assertNull(AdbClient.parseDisplaySize(listOf("Physical size: unknown")))
+        assertNull(AdbClient.parseDisplaySize(listOf("Physical size: 0x0")))
+    }
+
+    @Test
     fun `the pairing code is stripped from adb's own output`() {
         // adb echoes the code back in some failure messages; it must not reach
         // a log line, an error message or the debug pane.

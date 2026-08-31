@@ -11,7 +11,7 @@ import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import dev.alexdev404.droidctl.DroidCtlLog
 import dev.alexdev404.droidctl.model.KnownTarget
-import dev.alexdev404.droidctl.scrcpy.ScrcpyOptions
+import dev.alexdev404.droidctl.model.QualityMode
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -21,11 +21,25 @@ private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(na
 
 /** User settings that shape a mirroring session. */
 data class MirrorSettings(
-    val maxSize: Int = 0,
-    val videoBitRate: Int = ScrcpyOptions.DEFAULT_VIDEO_BIT_RATE,
+    /**
+     * Bit rate and resolution together, as one choice.
+     *
+     * They are not offered separately: asking the Target for 8 Mbps at 25% of
+     * its resolution, or 256 kbps at full resolution, is never what anyone
+     * wants, and two independent controls make those combinations the easiest
+     * ones to reach by accident.
+     */
+    val qualityMode: QualityMode = QualityMode.Automatic,
     val maxFps: Int = 0,
     val stayAwake: Boolean = false,
     val showTouches: Boolean = false,
+    /**
+     * Blank the Target's own screen while mirroring.
+     *
+     * Nothing needs undoing on teardown: the server's CleanUp restores the
+     * display when it exits, including when the Host disappears abruptly.
+     */
+    val turnScreenOff: Boolean = false,
     /** Dump the raw post-header payload stream to a file instead of decoding it. */
     val rawDumpEnabled: Boolean = false,
     /** Debug builds only: route the connection layer at the bundled fake server. */
@@ -57,11 +71,11 @@ class DroidCtlPreferences(private val context: Context) {
 
     val settings: Flow<MirrorSettings> = context.dataStore.data.map { prefs ->
         MirrorSettings(
-            maxSize = prefs[KEY_MAX_SIZE] ?: 0,
-            videoBitRate = prefs[KEY_BIT_RATE] ?: ScrcpyOptions.DEFAULT_VIDEO_BIT_RATE,
+            qualityMode = QualityMode.decode(prefs[KEY_QUALITY_MODE]),
             maxFps = prefs[KEY_MAX_FPS] ?: 0,
             stayAwake = prefs[KEY_STAY_AWAKE] ?: false,
             showTouches = prefs[KEY_SHOW_TOUCHES] ?: false,
+            turnScreenOff = prefs[KEY_TURN_SCREEN_OFF] ?: false,
             rawDumpEnabled = prefs[KEY_RAW_DUMP] ?: false,
             useFakeServer = prefs[KEY_FAKE_SERVER] ?: false,
         )
@@ -106,11 +120,11 @@ class DroidCtlPreferences(private val context: Context) {
         val current = settings.first()
         val next = transform(current)
         context.dataStore.edit { prefs ->
-            prefs[KEY_MAX_SIZE] = next.maxSize
-            prefs[KEY_BIT_RATE] = next.videoBitRate
+            prefs[KEY_QUALITY_MODE] = next.qualityMode.encode()
             prefs[KEY_MAX_FPS] = next.maxFps
             prefs[KEY_STAY_AWAKE] = next.stayAwake
             prefs[KEY_SHOW_TOUCHES] = next.showTouches
+            prefs[KEY_TURN_SCREEN_OFF] = next.turnScreenOff
             prefs[KEY_RAW_DUMP] = next.rawDumpEnabled
             prefs[KEY_FAKE_SERVER] = next.useFakeServer
         }
@@ -170,11 +184,11 @@ class DroidCtlPreferences(private val context: Context) {
         val KEY_ACTIVE_FORWARDS = stringSetPreferencesKey("active_forwards")
         val KEY_LAST_CONNECT = stringPreferencesKey("last_manual_connect")
         val KEY_LAST_PAIR = stringPreferencesKey("last_manual_pair")
-        val KEY_MAX_SIZE = intPreferencesKey("max_size")
-        val KEY_BIT_RATE = intPreferencesKey("video_bit_rate")
+        val KEY_QUALITY_MODE = stringPreferencesKey("quality_mode")
         val KEY_MAX_FPS = intPreferencesKey("max_fps")
         val KEY_STAY_AWAKE = booleanPreferencesKey("stay_awake")
         val KEY_SHOW_TOUCHES = booleanPreferencesKey("show_touches")
+        val KEY_TURN_SCREEN_OFF = booleanPreferencesKey("turn_screen_off")
         val KEY_RAW_DUMP = booleanPreferencesKey("raw_dump")
         val KEY_FAKE_SERVER = booleanPreferencesKey("use_fake_server")
     }

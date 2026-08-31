@@ -52,19 +52,42 @@ debug/     FakeServerEndpoint; DebugSupport has separate debug/ and release/ bod
 `droidctl/src/release/` holds the release-build stub that reports the fake server
 as unavailable.
 
+## Connection quality
+
+scrcpy fixes both the video bit rate and the resolution when the server starts
+(`Controller.resizeDisplay` only works for a virtual display), so the choice has
+to be made before launch and lasts for the session.
+
+Settings offers a ladder, each rung naming what it costs and what it gives up —
+`256 kbps · 25% resolution` through `8 Mbps · full resolution` — plus
+**Automatic**. Resolution is a fraction of the Target's own longer side, read
+with `wm size`, so a rung means the same thing on a 720p phone and a 1440p one.
+
+Automatic measures the link by **timing the `scrcpy-server.jar` push**, which
+has to happen anyway: no extra traffic and no added delay. It then picks the
+best rung whose bit rate fits inside 60% of the measurement. The margin covers
+what the push does not measure — it runs Host to Target while video runs the
+other way, and an encoder treats its bit rate as an average it overshoots on
+scene changes. A push too brief to time is treated as a fast link, not a slow
+one.
+
+The debug pane shows the measurement, the chosen rung, the resulting
+`max_size`, and live throughput off the video socket.
+
 ## How a session works
 
 1. `adb connect <host>:<port>` — Target appears in `adb devices`.
 2. Extract `scrcpy-server.jar` from assets, verify its SHA-256, `adb push` it to
-   `/data/local/tmp/`.
-3. Bind an ephemeral local port, then
+   `/data/local/tmp/` — timing the push, which is the bandwidth probe.
+3. Read `wm size` and pick the quality rung.
+4. Bind an ephemeral local port, then
    `adb forward tcp:<port> localabstract:scrcpy_<scid>`.
-4. `adb shell CLASSPATH=... app_process / com.genymobile.scrcpy.Server 4.1 ...`,
+5. `adb shell CLASSPATH=... app_process / com.genymobile.scrcpy.Server 4.1 ...`,
    kept as a live handle so its stdout/stderr reach the debug pane.
-5. Connect two ordinary `java.net.Socket`s to `127.0.0.1:<port>` — **video
+6. Connect two ordinary `java.net.Socket`s to `127.0.0.1:<port>` — **video
    first, control second** — read the dummy byte, the 64-byte device name, the
    codec id and the first session record.
-6. Feed the video socket to `MediaCodec` in async mode, rendering to the mirror
+7. Feed the video socket to `MediaCodec` in async mode, rendering to the mirror
    `SurfaceView`; serialize touches and keys onto the control socket.
 
 Only the adb invocations need root. The data path is unprivileged.

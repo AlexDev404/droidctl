@@ -2,7 +2,6 @@ package dev.alexdev404.droidctl.scrcpy
 
 import android.content.Context
 import dev.alexdev404.droidctl.DroidCtlLog
-import dev.alexdev404.droidctl.adb.AdbClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -64,20 +63,6 @@ class ScrcpyServerAsset(private val context: Context) {
             log.i("Extracted scrcpy server ${ScrcpyProtocol.VERSION} (${cachedJar.length()} bytes)")
             cachedJar
         }
-    }
-
-    /**
-     * Pushes the jar to the Target.
-     *
-     * Always pushed, never cached on the Target: `/data/local/tmp` may hold a
-     * jar from a different scrcpy version left behind by another tool, and a
-     * version mismatch makes the server abort with an error that reads like a
-     * protocol bug.
-     */
-    suspend fun pushTo(adb: AdbClient, serial: String): Result<String> {
-        val jar = extract().getOrElse { return Result.failure(it) }
-        return adb.push(serial, jar, ScrcpyOptions.DEVICE_SERVER_PATH)
-            .map { ScrcpyOptions.DEVICE_SERVER_PATH }
     }
 
     private fun sha256(file: File): String {

@@ -205,6 +205,25 @@ class AdbClient(
     }
 
     /**
+     * The Target's display size in pixels, via `adb shell wm size`.
+     *
+     * Needed because a quality rung expresses resolution as a *fraction* of the
+     * Target's own screen, while scrcpy's `max_size` is absolute. Read before
+     * launching, since `max_size` is fixed when the server starts.
+     */
+    suspend fun displaySize(serial: String): Result<DisplaySize> {
+        val result = shell.run(binary, AdbCommand.of("-s", serial, "shell", "wm size"))
+        if (!result.isSuccess) {
+            return Result.failure(result.asException("Could not read the Target's display size"))
+        }
+        return parseDisplaySize(result.stdout)
+            ?.let { Result.success(it) }
+            ?: Result.failure(
+                AdbException("Could not parse `wm size` output: ${result.stdoutText}", result)
+            )
+    }
+
+    /**
      * Starts `adb -s <serial> shell <command>` and keeps the handle.
      *
      * Used for the `app_process` invocation that runs the scrcpy server: it is
@@ -239,10 +258,43 @@ class AdbClient(
             }
 
         /**
+         * Parses `wm size`.
+         *
+         * ```
+         * Physical size: 1080x2400
+         * Override size: 720x1600
+         * ```
+         *
+         * The override wins when present: it is the resolution the Target is
+         * actually running at, and so the one scrcpy will capture.
+         */
+        internal fun parseDisplaySize(lines: List<String>): DisplaySize? {
+            val sizes = lines.mapNotNull { line ->
+                val match = SIZE_PATTERN.find(line) ?: return@mapNotNull null
+                val (kind, width, height) = match.destructured
+                val w = width.toIntOrNull() ?: return@mapNotNull null
+                val h = height.toIntOrNull() ?: return@mapNotNull null
+                if (w <= 0 || h <= 0) return@mapNotNull null
+                kind.lowercase() to DisplaySize(w, h)
+            }.toMap()
+            return sizes["override"] ?: sizes["physical"]
+        }
+
+        private val SIZE_PATTERN = Regex("""(\w+)\s+size:\s*(\d+)x(\d+)""")
+
+        /**
          * Belt and braces: adb sometimes echoes the pairing code back in its own
          * error text, so strip it from anything we are about to show or log.
          */
         internal fun redactCode(text: String, code: String): String =
             if (code.isEmpty()) text else text.replace(code, "<redacted>")
     }
+}
+
+/** A Target's display size in pixels. */
+data class DisplaySize(val width: Int, val height: Int) {
+    /** scrcpy's `max_size` caps the longer side, so that is what a rung scales. */
+    val longerSide: Int get() = maxOf(width, height)
+
+    override fun toString(): String = "${width}x$height"
 }

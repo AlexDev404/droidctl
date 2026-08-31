@@ -12,12 +12,16 @@ import dev.alexdev404.droidctl.debug.FakeServerEndpoint
 import dev.alexdev404.droidctl.input.KeyMapper
 import dev.alexdev404.droidctl.input.MotionEventAdapter
 import dev.alexdev404.droidctl.input.TouchMapper
+import dev.alexdev404.droidctl.adb.DisplaySize
 import dev.alexdev404.droidctl.model.ConnectionInfo
+import dev.alexdev404.droidctl.model.ConnectionQuality
+import dev.alexdev404.droidctl.model.QualityMode
 import dev.alexdev404.droidctl.model.KnownTarget
 import dev.alexdev404.droidctl.scrcpy.ControlChannel
 import dev.alexdev404.droidctl.scrcpy.ControlMessage
 import dev.alexdev404.droidctl.scrcpy.ScrcpyConnection
 import dev.alexdev404.droidctl.scrcpy.ScrcpyLauncher
+import dev.alexdev404.droidctl.scrcpy.PushMeasurement
 import dev.alexdev404.droidctl.scrcpy.ScrcpyOptions
 import dev.alexdev404.droidctl.scrcpy.ScrcpyServerHandle
 import dev.alexdev404.droidctl.video.DecoderStats
@@ -77,6 +81,26 @@ class MirrorSession(
     private val _rawDumpPath = MutableStateFlow<String?>(null)
     val rawDumpPath: StateFlow<String?> = _rawDumpPath.asStateFlow()
 
+    private val _quality = MutableStateFlow(ConnectionQuality.UNMEASURED_DEFAULT)
+
+    /** The rung this session is running on. */
+    val quality: StateFlow<ConnectionQuality> = _quality.asStateFlow()
+
+    private val _linkMeasurement = MutableStateFlow<PushMeasurement?>(null)
+
+    /** What pushing the server measured about the link, for the debug pane. */
+    val linkMeasurement: StateFlow<PushMeasurement?> = _linkMeasurement.asStateFlow()
+
+    private val _network = MutableStateFlow<NetworkSample?>(null)
+
+    /** Live throughput off the video socket. Reported only; nothing acts on it. */
+    val network: StateFlow<NetworkSample?> = _network.asStateFlow()
+
+    private val _targetDisplay = MutableStateFlow<DisplaySize?>(null)
+
+    /** The Target's own screen size, which a quality rung is a fraction of. */
+    val targetDisplay: StateFlow<DisplaySize?> = _targetDisplay.asStateFlow()
+
     val surfaceBridge = SurfaceHolderBridge()
     val touchMapper = TouchMapper()
 
@@ -93,6 +117,8 @@ class MirrorSession(
     private var statsJob: Job? = null
     private var viewportJob: Job? = null
     private var startJob: Job? = null
+    private var networkJob: Job? = null
+    private var bandwidthMonitor: BandwidthMonitor? = null
 
     /**
      * Bumped for every start attempt and every teardown.
@@ -211,6 +237,8 @@ class MirrorSession(
                 activeTarget = target
                 activeSettings = settings
                 reconnectAttempt = 0
+                _targetDisplay.value = null
+                _linkMeasurement.value = null
                 startLocked(target, settings)
             }
         }
@@ -221,85 +249,168 @@ class MirrorSession(
         // Everything this attempt creates is tagged with this number, so a
         // report from a previous attempt can be told apart and dropped.
         generation++
-        val options = ScrcpyOptions(
-            scid = ScrcpyOptions.generateScid(),
-            maxSize = settings.maxSize,
-            videoBitRate = settings.videoBitRate,
-            maxFps = settings.maxFps,
-            stayAwake = settings.stayAwake,
-            showTouches = settings.showTouches,
-        )
-        val scoped = log.withScid(options.socketName)
+        val sessionGeneration = generation
         val useFake = settings.useFakeServer && DebugSupport.isFakeServerAvailable
         _serverOutput.value = emptyList()
 
         try {
-            val hostPort: Int
             if (useFake) {
-                scoped.i("USE_FAKE_SERVER: routing the connection layer at the bundled fake server")
+                _quality.value = (settings.qualityMode as? QualityMode.Fixed)?.quality
+                    ?: ConnectionQuality.UNMEASURED_DEFAULT
+                val options = buildOptions(settings)
+                log.withScid(options.socketName)
+                    .i("USE_FAKE_SERVER: routing the connection layer at the bundled fake server")
                 val endpoint = withContext(Dispatchers.IO) { DebugSupport.startFakeServer(context) }
                 fakeEndpoint = endpoint
-                hostPort = endpoint.port
-            } else {
-                _state.value = SessionState.PushingServer(target)
-                val handle = launcher.launch(target.serial, options).getOrElse { error ->
-                    failLocked("start-server", error, serverOutputLines())
-                    return
-                }
-                serverHandle = handle
-                hostPort = handle.hostPort
-                activeForward = handle.serial to handle.hostPort
-                preferences.recordForward(handle.serial, handle.hostPort)
-
-                serverLogJob = scope.launch {
-                    handle.output.collect { line ->
-                        _serverOutput.value = (_serverOutput.value + line).takeLast(SERVER_LOG_LINES)
-                    }
-                }
-            }
-
-            val info = ConnectionInfo(target.serial, hostPort, options.socketName, options)
-            _state.value = SessionState.StartingServer(target, info)
-            _state.value = SessionState.AwaitingSockets(target, info)
-
-            val opened = ScrcpyConnection.open(
-                hostPort = hostPort,
-                scid = options.socketName,
-                serverDiagnostics = ::serverDiagnostics,
-            ).getOrElse { error ->
-                failLocked("await-sockets", error, serverOutputLines())
+                openStream(target, settings, options, endpoint.port, sessionGeneration)
                 return
             }
-            connection = opened
 
-            val sink = buildSink(options.socketName, settings, opened.meta)
-            val streamPump = VideoStreamPump(opened.videoInput, sink, options.socketName)
-            pump = streamPump
+            _state.value = SessionState.PushingServer(target)
 
-            val channel = ControlChannel(opened.controlSocket, scope, options.socketName)
-            channel.start()
-            controlChannel = channel
+            // Pushing the jar is the only sizeable transfer that happens before
+            // there is a video stream, so it doubles as the bandwidth probe.
+            // Both settings a rung controls are fixed the moment the server
+            // starts, which is why the choice has to be made here and not later.
+            val measurement = launcher.pushServer(target.serial).getOrElse { error ->
+                failLocked("push-server", error, serverOutputLines())
+                return
+            }
+            _linkMeasurement.value = measurement
 
-            // Prime the transform before the first touch can arrive.
-            targetSize = opened.meta.width to opened.meta.height
-            refreshViewport()
-            viewportJob = scope.launch {
-                surfaceBridge.viewSize.collect { refreshViewport() }
+            if (_targetDisplay.value == null) {
+                // max_size is absolute while a rung is a fraction of the
+                // Target's own screen, so that size is needed before launching.
+                _targetDisplay.value = adb.displaySize(target.serial)
+                    .onFailure { log.w("Could not read the Target's display size: ${it.message}") }
+                    .getOrNull()
             }
 
-            streamPump.start()
+            _quality.value = chooseQuality(settings.qualityMode, measurement)
+            val options = buildOptions(settings)
+            val scoped = log.withScid(options.socketName)
 
-            streamingSinceMillis = System.currentTimeMillis()
-            _state.value = SessionState.Streaming(target, info, opened.meta)
+            val handle = launcher.launch(target.serial, options).getOrElse { error ->
+                failLocked("start-server", error, serverOutputLines())
+                return
+            }
+            serverHandle = handle
+            activeForward = handle.serial to handle.hostPort
+            preferences.recordForward(handle.serial, handle.hostPort)
+            serverLogJob = scope.launch {
+                handle.output.collect { line ->
+                    _serverOutput.value = (_serverOutput.value + line).takeLast(SERVER_LOG_LINES)
+                }
+            }
             scoped.i(
-                "Streaming from ${target.name} " +
-                    "(${opened.meta.codecName} ${opened.meta.width}x${opened.meta.height})"
+                "Launching at ${_quality.value.label}" +
+                    (options.maxSize.takeIf { it > 0 }?.let { " (max_size=$it)" } ?: "") +
+                    ", link measured at ${measurement.bitsPerSecond / 1000} kbps"
             )
+
+            openStream(target, settings, options, handle.hostPort, sessionGeneration)
         } catch (e: kotlinx.coroutines.CancellationException) {
             teardownLocked(disconnectAdb = false)
             throw e
         } catch (e: Throwable) {
             failLocked("start", e, serverOutputLines())
+        }
+    }
+
+    /**
+     * The half of a start that is the same whether the server is real or fake:
+     * connect the sockets, wire up the decoder, the control channel and the
+     * touch transform, and begin streaming.
+     */
+    private suspend fun openStream(
+        target: KnownTarget,
+        settings: MirrorSettings,
+        options: ScrcpyOptions,
+        hostPort: Int,
+        sessionGeneration: Int,
+    ) {
+        val scoped = log.withScid(options.socketName)
+        val info = ConnectionInfo(target.serial, hostPort, options.socketName, options)
+        _state.value = SessionState.StartingServer(target, info)
+        _state.value = SessionState.AwaitingSockets(target, info)
+
+        val opened = ScrcpyConnection.open(
+            hostPort = hostPort,
+            scid = options.socketName,
+            serverDiagnostics = ::serverDiagnostics,
+        ).getOrElse { error ->
+            failLocked("await-sockets", error, serverOutputLines())
+            return
+        }
+        connection = opened
+
+        val sink = buildSink(options.socketName, settings, opened.meta)
+        val streamPump = VideoStreamPump(opened.videoInput, sink, options.socketName)
+        pump = streamPump
+
+        val channel = ControlChannel(opened.controlSocket, scope, options.socketName)
+        channel.start()
+        controlChannel = channel
+
+        if (settings.turnScreenOff) {
+            // The server restores the display itself when it exits, including on
+            // an abrupt disconnection, so there is nothing to undo on teardown.
+            scoped.i("Turning the Target's screen off for this session")
+            channel.send(ControlMessage.SetDisplayPower(on = false))
+        }
+
+        // Prime the transform before the first touch can arrive.
+        targetSize = opened.meta.width to opened.meta.height
+        refreshViewport()
+        viewportJob = scope.launch {
+            surfaceBridge.viewSize.collect { refreshViewport() }
+        }
+
+        networkJob = scope.launch { publishNetworkSamples(sessionGeneration) }
+
+        streamPump.start()
+
+        streamingSinceMillis = System.currentTimeMillis()
+        _state.value = SessionState.Streaming(target, info, opened.meta)
+        scoped.i(
+            "Streaming from ${target.name} at ${_quality.value.label} " +
+                "(${opened.meta.codecName} ${opened.meta.width}x${opened.meta.height})"
+        )
+    }
+
+    /**
+     * The rung to launch on.
+     *
+     * A fixed rung is used as-is. Automatic converts the push measurement into
+     * one, and treats a push too brief to time as evidence of a fast link rather
+     * than a slow one -- 700-odd kilobytes inside [PushMeasurement.MIN_MEANINGFUL_MS]
+     * is tens of megabits either way.
+     */
+    private fun chooseQuality(mode: QualityMode, measurement: PushMeasurement): ConnectionQuality {
+        if (mode is QualityMode.Fixed) return mode.quality
+        if (!measurement.isMeaningful) {
+            log.i("Link too fast to time reliably ($measurement); assuming the top rung")
+            return ConnectionQuality.entries.last()
+        }
+        val chosen = ConnectionQuality.forMeasuredBandwidth(measurement.bitsPerSecond)
+        log.i("Automatic quality: $measurement -> ${chosen.label}")
+        return chosen
+    }
+
+    private fun buildOptions(settings: MirrorSettings) = ScrcpyOptions(
+        scid = ScrcpyOptions.generateScid(),
+        maxSize = _quality.value.maxSizeFor(_targetDisplay.value?.longerSide),
+        videoBitRate = _quality.value.bitRate,
+        maxFps = settings.maxFps,
+        stayAwake = settings.stayAwake,
+        showTouches = settings.showTouches,
+    )
+
+    /** Publishes throughput for the debug pane. Reports only; nothing acts on it. */
+    private suspend fun publishNetworkSamples(sessionGeneration: Int) {
+        while (generation == sessionGeneration && !stopping) {
+            delay(NETWORK_SAMPLE_INTERVAL_MS)
+            _network.value = bandwidthMonitor?.sample() ?: continue
         }
     }
 
@@ -323,7 +434,7 @@ class MirrorSession(
             rawDump = dump
             _rawDumpPath.value = dump.path
             log.i("Raw-dump mode: writing the payload stream to ${dump.path} (no decoder)")
-            return SessionVideoSink(dump, generation)
+            return SessionVideoSink(measured(dump), generation)
         }
 
         // The surface may not exist yet if the mirror screen has not finished
@@ -356,8 +467,12 @@ class MirrorSession(
         // Seed the decoder with the size from the handshake; the stream sends
         // another size record on every change.
         videoDecoder.onSizeChanged(meta.width, meta.height)
-        return SessionVideoSink(videoDecoder, myGeneration)
+        return SessionVideoSink(measured(videoDecoder), myGeneration)
     }
+
+    /** Wraps [delegate] in this session's bandwidth monitor. */
+    private fun measured(delegate: VideoSink): VideoSink =
+        BandwidthMonitor(delegate).also { bandwidthMonitor = it }
 
     /**
      * Wraps the real sink so the session sees the two things it must react to:
@@ -548,6 +663,11 @@ class MirrorSession(
         viewportJob?.cancel()
         viewportJob = null
 
+        networkJob?.cancel()
+        networkJob = null
+        bandwidthMonitor = null
+        _network.value = null
+
         // Stop reading before the socket goes away so the pump reports a
         // teardown rather than a stream failure.
         pump?.stop()
@@ -611,6 +731,7 @@ class MirrorSession(
          */
         const val STABLE_SESSION_MS = 10_000L
         const val SERVER_LOG_LINES = 300
+        const val NETWORK_SAMPLE_INTERVAL_MS = 2_000L
         const val SURFACE_TIMEOUT_MS = 10_000L
     }
 }

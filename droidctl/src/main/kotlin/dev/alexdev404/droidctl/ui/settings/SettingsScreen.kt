@@ -3,6 +3,10 @@ package dev.alexdev404.droidctl.ui.settings
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.ui.semantics.Role
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -19,6 +23,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -33,6 +38,7 @@ import androidx.compose.ui.unit.dp
 import dev.alexdev404.droidctl.AppContainer
 import dev.alexdev404.droidctl.BuildConfig
 import dev.alexdev404.droidctl.data.MirrorSettings
+import dev.alexdev404.droidctl.model.QualityMode
 import dev.alexdev404.droidctl.debug.DebugSupport
 import dev.alexdev404.droidctl.scrcpy.ScrcpyProtocol
 import kotlinx.coroutines.launch
@@ -72,17 +78,19 @@ fun SettingsScreen(
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             item {
-                Text("Video", style = MaterialTheme.typography.titleMedium)
-                NumberField(
-                    label = "Max size (px, 0 = the Target's own size)",
-                    value = settings.maxSize,
-                    onValue = { value -> update { it.copy(maxSize = value) } },
+                Text("Connection quality", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "How much bandwidth to ask the Target's encoder for, and how much of its " +
+                        "resolution to send. scrcpy fixes both when the session starts, so this " +
+                        "takes effect on the next connection.",
+                    style = MaterialTheme.typography.bodySmall,
                 )
-                NumberField(
-                    label = "Video bit rate (bits/s)",
-                    value = settings.videoBitRate,
-                    onValue = { value -> update { it.copy(videoBitRate = value) } },
+                Spacer(Modifier.height(8.dp))
+                QualityPicker(
+                    selected = settings.qualityMode,
+                    onSelect = { mode -> update { it.copy(qualityMode = mode) } },
                 )
+                Spacer(Modifier.height(12.dp))
                 NumberField(
                     label = "Max FPS (0 = unlimited)",
                     value = settings.maxFps,
@@ -104,6 +112,13 @@ fun SettingsScreen(
                     subtitle = "Draws the injected touches on the Target's own screen.",
                     checked = settings.showTouches,
                     onChange = { value -> update { it.copy(showTouches = value) } },
+                )
+                SwitchRow(
+                    title = "Turn the Target's screen off",
+                    subtitle = "Blanks the Target's own display while mirroring. It is restored " +
+                        "when the session ends, even if the connection drops.",
+                    checked = settings.turnScreenOff,
+                    onChange = { value -> update { it.copy(turnScreenOff = value) } },
                 )
             }
 
@@ -140,6 +155,44 @@ fun SettingsScreen(
                 )
                 TextButton(onClick = onLicenses) { Text("Open source licenses") }
                 Spacer(Modifier.height(24.dp))
+            }
+        }
+    }
+}
+
+/**
+ * The quality ladder, Automatic first.
+ *
+ * Each rung is labelled with what it costs and what it gives up, because the
+ * choice is a trade the user is making rather than an opaque "quality level".
+ */
+@Composable
+private fun QualityPicker(selected: QualityMode, onSelect: (QualityMode) -> Unit) {
+    Column(Modifier.selectableGroup()) {
+        for (mode in QualityMode.all()) {
+            val isSelected = mode == selected
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .selectable(
+                        selected = isSelected,
+                        onClick = { onSelect(mode) },
+                        role = Role.RadioButton,
+                    )
+                    .padding(vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                RadioButton(selected = isSelected, onClick = null)
+                Spacer(Modifier.width(12.dp))
+                Column {
+                    Text(mode.label, style = MaterialTheme.typography.bodyLarge)
+                    if (mode is QualityMode.Automatic) {
+                        Text(
+                            "Times the server upload at connect and picks the rung that fits.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
             }
         }
     }

@@ -59,6 +59,17 @@ fun DebugPaneScreen(container: AppContainer, onBack: () -> Unit) {
         .collectAsState()
     val rawDump by (session?.rawDumpPath ?: kotlinx.coroutines.flow.MutableStateFlow(null))
         .collectAsState()
+    val quality by (session?.quality
+        ?: kotlinx.coroutines.flow.MutableStateFlow(
+            dev.alexdev404.droidctl.model.ConnectionQuality.UNMEASURED_DEFAULT
+        ))
+        .collectAsState()
+    val linkMeasurement by (session?.linkMeasurement ?: kotlinx.coroutines.flow.MutableStateFlow(null))
+        .collectAsState()
+    val network by (session?.network ?: kotlinx.coroutines.flow.MutableStateFlow(null))
+        .collectAsState()
+    val targetDisplay by (session?.targetDisplay ?: kotlinx.coroutines.flow.MutableStateFlow(null))
+        .collectAsState()
     val logLines by LogBuffer.tail.collectAsState()
 
     val logListState = rememberLazyListState()
@@ -103,6 +114,27 @@ fun DebugPaneScreen(container: AppContainer, onBack: () -> Unit) {
             Field("adb binary", container.binary?.path ?: "-")
             Field("Bit rate", connection?.options?.videoBitRate?.let { "$it bit/s" } ?: "-")
             rawDump?.let { Field("Raw dump", it) }
+
+            Spacer(Modifier.height(8.dp))
+            HorizontalDivider()
+            Text("Link", style = MaterialTheme.typography.titleMedium)
+            Field("Quality", quality.label)
+            Field("Target screen", targetDisplay?.toString() ?: "unknown")
+            Field(
+                "max_size",
+                connection?.options?.maxSize?.let { if (it == 0) "uncapped" else "$it px" } ?: "-",
+            )
+            Field(
+                "Measured at connect",
+                linkMeasurement?.let {
+                    "${it.bitsPerSecond / 1000} kbps ($it)" +
+                        if (it.isMeaningful) "" else " — too brief to time"
+                } ?: "-",
+            )
+            Field(
+                "Video throughput",
+                network?.let { "${it.throughputBitsPerSecond / 1000} kbps over ${it.spanMs} ms" } ?: "-",
+            )
 
             Spacer(Modifier.height(8.dp))
             HorizontalDivider()

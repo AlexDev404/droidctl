@@ -129,6 +129,32 @@ where each touch actually landed.
 | 7.7 | Rotate the Target, then repeat 7.1 and 7.2 | Still accurate. Stale dimensions would show up here as a consistent offset | `DroidCtl/Input` |
 | 7.8 | While a finger is down, press the Host's Home key, then return | No stuck finger on the Target | — |
 
+## 7b. Connection quality
+
+| # | Do this | Expect | Log tag |
+|---|---|---|---|
+| 7b.1 | Settings → Connection quality → pick `256 kbps · 25% resolution`, then mirror | Visibly soft video. The debug pane's `max_size` is about a quarter of the Target's longer side | `DroidCtl/Session` |
+| 7b.2 | Pick `8 Mbps · full resolution`, mirror again | Sharp video; the debug pane shows `max_size: uncapped` | `DroidCtl/Session` |
+| 7b.3 | Pick **Automatic** on good Wi-Fi and mirror | The log shows `Automatic quality: ... -> <rung>`, and the debug pane's "Measured at connect" is plausible for your network | `DroidCtl/Session` |
+| 7b.4 | Compare the debug pane's "Target screen" against the Target's real resolution | They match (`wm size` was read correctly) | `DroidCtl/Session` |
+| 7b.5 | Move the Host far from the access point, or throttle the network, then mirror on Automatic | A lower rung is chosen than in 7b.3 | `DroidCtl/Session` |
+| 7b.6 | Watch the debug pane's "Video throughput" on a busy screen, then a static one | Rises with motion, falls to near zero when nothing moves | — |
+
+Automatic decides once, at connect. It does not re-adjust mid-session, because
+scrcpy cannot change either setting without relaunching the server — so a
+network that degrades *during* a session stays on the rung it started on.
+Reconnect to re-measure.
+
+## 7c. Turning the Target's screen off
+
+| # | Do this | Expect |
+|---|---|---|
+| 7c.1 | Settings → turn on "Turn the Target's screen off", then mirror | The Target's own screen goes black while the mirror keeps working |
+| 7c.2 | Tap and swipe in the mirror | Input still lands on the Target |
+| 7c.3 | Press the Target's physical power button | It stays off (the server keeps re-blanking it) |
+| 7c.4 | Stop mirroring | The Target's screen comes back on |
+| 7c.5 | Mirror again, then kill DroidCtl from the recents screen | The Target's screen still comes back — the server's CleanUp restores it even on an abrupt disconnection |
+
 ## 8. Buttons, keys and text
 
 | # | Do this | Expect |
