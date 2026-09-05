@@ -15,6 +15,10 @@ pluginManagement {
 // The scrcpy server, built as an APK and shipped as scrcpy-server.jar.
 include ':server'
 
+// Bridges a TCP port to scrcpy's abstract unix socket on the Target, so a
+// transport without adb's `forward` (SSH) can still reach the server.
+include ':relay'
+
 // DroidCtl: the Android host application that mirrors a second Android device.
 // It cannot be called ':app' because app/ already holds the scrcpy C client.
 include ':droidctl'

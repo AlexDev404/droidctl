@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Never installed as an app. The APK is used only as a jar on the Target's
+  CLASSPATH, run through app_process, the same way scrcpy's server is.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" />

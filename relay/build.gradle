@@ -1,0 +1,31 @@
+// A tiny helper that runs on the Target under app_process, exactly like the
+// scrcpy server does, and bridges a TCP port to scrcpy's abstract unix socket.
+//
+// Built as its own module rather than being folded into :droidctl because it
+// runs in a completely different process, on the other device, under the
+// Android runtime rather than the app's. It is pushed over the same link the
+// user is mirroring across, so it is deliberately kept to a few kilobytes.
+apply plugin: 'com.android.application'
+
+android {
+    namespace = 'dev.alexdev404.droidctl.relay'
+    compileSdk = 36
+    defaultConfig {
+        applicationId = "dev.alexdev404.droidctl.relay"
+        // Matches :server, so the relay runs anywhere the scrcpy server does.
+        minSdkVersion 21
+        targetSdkVersion 36
+        versionCode 1
+        versionName "1.0"
+    }
+    buildTypes {
+        release {
+            // Not for obfuscation but for size: AGP contributes the Kotlin
+            // runtime even though there is no Kotlin here, taking a few
+            // kilobytes of relay to a couple of megabytes. R8 keeps only what
+            // main() actually reaches.
+            minifyEnabled true
+            proguardFiles 'proguard-rules.pro'
+        }
+    }
+}

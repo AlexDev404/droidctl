@@ -48,9 +48,9 @@ private data class Attribution(
 /**
  * Open source licenses.
  *
- * scrcpy in particular is *redistributed*: the APK contains its server, so
- * Apache 2.0 requires the license text to travel with it. It ships at
- * `assets/licenses/scrcpy-LICENSE` and is shown in full here.
+ * scrcpy and jsch in particular are *redistributed*: the APK contains scrcpy's
+ * server and jsch's classes, and both licenses require their text to travel
+ * with the code. Both ship under `assets/licenses/` and are shown in full here.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -77,6 +77,15 @@ fun LicensesScreen(onBack: () -> Unit) {
                 license = "Apache License 2.0",
                 url = "https://github.com/Genymobile/scrcpy",
                 licenseAsset = "licenses/scrcpy-LICENSE",
+            ),
+            Attribution(
+                name = "jsch (com.github.mwiede fork)",
+                version = "2.28.7",
+                copyright = "Copyright (c) 2002-2015 Atsuhiko Yamanaka, JCraft, Inc., " +
+                    "and the fork's contributors",
+                license = "BSD 3-Clause (embedding JZlib, BSD 3-Clause, and jBCrypt, ISC)",
+                url = "https://github.com/mwiede/jsch",
+                licenseAsset = "licenses/jsch-LICENSE",
             ),
             Attribution(
                 name = "libsu",
@@ -125,7 +134,8 @@ fun LicensesScreen(onBack: () -> Unit) {
                 Text(
                     "DroidCtl bundles an unmodified build of the scrcpy server. It is not " +
                         "modified in any way; it is compiled from the scrcpy sources in this " +
-                        "repository and shipped as-is.",
+                        "repository and shipped as-is. The relay pushed to the Target in SSH " +
+                        "mode is DroidCtl's own code, not a third party's.",
                     style = MaterialTheme.typography.bodyMedium,
                 )
             }

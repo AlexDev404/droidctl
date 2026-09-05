@@ -17,6 +17,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -39,8 +40,10 @@ import dev.alexdev404.droidctl.AppContainer
 import dev.alexdev404.droidctl.BuildConfig
 import dev.alexdev404.droidctl.data.MirrorSettings
 import dev.alexdev404.droidctl.model.QualityMode
+import dev.alexdev404.droidctl.model.TransportKind
 import dev.alexdev404.droidctl.debug.DebugSupport
 import dev.alexdev404.droidctl.scrcpy.ScrcpyProtocol
+import dev.alexdev404.droidctl.ui.common.SshIdentityCard
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -78,6 +81,32 @@ fun SettingsScreen(
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             item {
+                Text("Connection mode", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "ADB drives the Target from this device's own adb, which needs root and the " +
+                        "adb-ndk module here. SSH logs in to the Target instead, which needs " +
+                        "root and an sshd there and nothing at all here. Saved Targets keep the " +
+                        "mode they were added with.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    for (kind in TransportKind.entries) {
+                        FilterChip(
+                            selected = kind == settings.transport,
+                            onClick = { update { it.copy(transport = kind) } },
+                            label = { Text(kind.label) },
+                        )
+                    }
+                }
+                if (settings.transport == TransportKind.Ssh) {
+                    Spacer(Modifier.height(12.dp))
+                    SshIdentityCard(keys = container.sshKeys)
+                }
+            }
+
+            item {
+                HorizontalDivider()
                 Text("Connection quality", style = MaterialTheme.typography.titleMedium)
                 Text(
                     "How much bandwidth to ask the Target's encoder for, and how much of its " +

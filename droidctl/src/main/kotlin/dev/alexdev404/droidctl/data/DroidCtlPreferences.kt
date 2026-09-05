@@ -12,6 +12,7 @@ import androidx.datastore.preferences.preferencesDataStore
 import dev.alexdev404.droidctl.DroidCtlLog
 import dev.alexdev404.droidctl.model.KnownTarget
 import dev.alexdev404.droidctl.model.QualityMode
+import dev.alexdev404.droidctl.model.TransportKind
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -30,6 +31,15 @@ data class MirrorSettings(
      * ones to reach by accident.
      */
     val qualityMode: QualityMode = QualityMode.Automatic,
+    /**
+     * Which transport new connections use.
+     *
+     * A setting rather than a per-Target guess: the two modes need root on
+     * different devices, so which one works is a property of the user's setup,
+     * not of the Target they happen to be tapping. Saved Targets remember the
+     * mode they were added with, so switching this does not strand them.
+     */
+    val transport: TransportKind = TransportKind.Adb,
     val maxFps: Int = 0,
     val stayAwake: Boolean = false,
     val showTouches: Boolean = false,
@@ -81,6 +91,7 @@ class DroidCtlPreferences(private val context: Context) {
     val settings: Flow<MirrorSettings> = context.dataStore.data.map { prefs ->
         MirrorSettings(
             qualityMode = QualityMode.decode(prefs[KEY_QUALITY_MODE]),
+            transport = TransportKind.decode(prefs[KEY_TRANSPORT]),
             maxFps = prefs[KEY_MAX_FPS] ?: 0,
             stayAwake = prefs[KEY_STAY_AWAKE] ?: false,
             showTouches = prefs[KEY_SHOW_TOUCHES] ?: false,
@@ -99,6 +110,19 @@ class DroidCtlPreferences(private val context: Context) {
     val lastManualPair: Flow<String> =
         context.dataStore.data.map { it[KEY_LAST_PAIR] ?: "" }
 
+    /**
+     * The last `host:port` and account typed into the SSH connect form.
+     *
+     * Kept apart from [lastManualConnect]: the two modes reach the same device
+     * on different ports, so one remembered address would be wrong for whichever
+     * mode the user did not last use.
+     */
+    val lastSshConnect: Flow<String> =
+        context.dataStore.data.map { it[KEY_LAST_SSH] ?: "" }
+
+    val lastSshUser: Flow<String> =
+        context.dataStore.data.map { it[KEY_LAST_SSH_USER] ?: "" }
+
     suspend fun rememberTarget(target: KnownTarget) {
         context.dataStore.edit { prefs ->
             val stored = (prefs[KEY_KNOWN_TARGETS] ?: emptySet()).mapNotNull { decodeTarget(it) }
@@ -108,6 +132,7 @@ class DroidCtlPreferences(private val context: Context) {
             val merged = target.copy(
                 lastMeasuredBitsPerSecond =
                     target.lastMeasuredBitsPerSecond ?: previous?.lastMeasuredBitsPerSecond,
+                sshHostKey = target.sshHostKey ?: previous?.sshHostKey,
             )
             prefs[KEY_KNOWN_TARGETS] = (others + merged).map { encodeTarget(it) }.toSet()
         }
@@ -140,6 +165,27 @@ class DroidCtlPreferences(private val context: Context) {
         }
     }
 
+    /**
+     * Pins the Target's SSH host key after the first successful connection.
+     *
+     * Only ever *adds* one: overwriting a pin from here would defeat the point
+     * of having it, so a Target whose key has changed has to be forgotten and
+     * added again, deliberately.
+     */
+    suspend fun rememberSshHostKey(target: KnownTarget, hostKey: String) {
+        context.dataStore.edit { prefs ->
+            val entries = (prefs[KEY_KNOWN_TARGETS] ?: emptySet()).mapNotNull { decodeTarget(it) }
+            val existing = entries.firstOrNull { it.host == target.host && it.port == target.port }
+                ?: return@edit
+            if (existing.sshHostKey != null) return@edit
+            prefs[KEY_KNOWN_TARGETS] =
+                (entries.filterNot { it.host == target.host && it.port == target.port } +
+                    existing.copy(sshHostKey = hostKey))
+                    .map { encodeTarget(it) }
+                    .toSet()
+        }
+    }
+
     suspend fun setLastManualConnect(value: String) {
         context.dataStore.edit { it[KEY_LAST_CONNECT] = value }
     }
@@ -148,11 +194,19 @@ class DroidCtlPreferences(private val context: Context) {
         context.dataStore.edit { it[KEY_LAST_PAIR] = value }
     }
 
+    suspend fun setLastSshConnect(address: String, user: String) {
+        context.dataStore.edit {
+            it[KEY_LAST_SSH] = address
+            it[KEY_LAST_SSH_USER] = user
+        }
+    }
+
     suspend fun updateSettings(transform: (MirrorSettings) -> MirrorSettings) {
         val current = settings.first()
         val next = transform(current)
         context.dataStore.edit { prefs ->
             prefs[KEY_QUALITY_MODE] = next.qualityMode.encode()
+            prefs[KEY_TRANSPORT] = next.transport.name
             prefs[KEY_MAX_FPS] = next.maxFps
             prefs[KEY_STAY_AWAKE] = next.stayAwake
             prefs[KEY_SHOW_TOUCHES] = next.showTouches
@@ -201,6 +255,9 @@ class DroidCtlPreferences(private val context: Context) {
         put("port", target.port)
         put("lastConnectedAt", target.lastConnectedAtMillis)
         target.lastMeasuredBitsPerSecond?.let { put("lastMeasuredBps", it) }
+        put("transport", target.transport.name)
+        target.sshUser?.let { put("sshUser", it) }
+        target.sshHostKey?.let { put("sshHostKey", it) }
     }.toString()
 
     private fun decodeTarget(raw: String): KnownTarget? = runCatching {
@@ -211,6 +268,11 @@ class DroidCtlPreferences(private val context: Context) {
             port = json.getInt("port"),
             lastConnectedAtMillis = json.optLong("lastConnectedAt"),
             lastMeasuredBitsPerSecond = json.optLong("lastMeasuredBps").takeIf { it > 0 },
+            // Absent on entries saved before SSH existed, which is exactly the
+            // adb default TransportKind.decode falls back to.
+            transport = TransportKind.decode(json.optString("transport")),
+            sshUser = json.optString("sshUser").takeIf { it.isNotBlank() },
+            sshHostKey = json.optString("sshHostKey").takeIf { it.isNotBlank() },
         )
     }.onFailure { log.w("Discarding an unreadable saved Target", it) }.getOrNull()
 
@@ -219,7 +281,10 @@ class DroidCtlPreferences(private val context: Context) {
         val KEY_ACTIVE_FORWARDS = stringSetPreferencesKey("active_forwards")
         val KEY_LAST_CONNECT = stringPreferencesKey("last_manual_connect")
         val KEY_LAST_PAIR = stringPreferencesKey("last_manual_pair")
+        val KEY_LAST_SSH = stringPreferencesKey("last_ssh_connect")
+        val KEY_LAST_SSH_USER = stringPreferencesKey("last_ssh_user")
         val KEY_QUALITY_MODE = stringPreferencesKey("quality_mode")
+        val KEY_TRANSPORT = stringPreferencesKey("transport")
         val KEY_MAX_FPS = intPreferencesKey("max_fps")
         val KEY_STAY_AWAKE = booleanPreferencesKey("stay_awake")
         val KEY_SHOW_TOUCHES = booleanPreferencesKey("show_touches")

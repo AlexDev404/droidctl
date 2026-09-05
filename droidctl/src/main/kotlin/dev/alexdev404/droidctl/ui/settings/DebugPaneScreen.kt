@@ -48,28 +48,18 @@ import dev.alexdev404.droidctl.session.SessionState
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DebugPaneScreen(container: AppContainer, onBack: () -> Unit) {
+    // The session exists from app start, whether or not any transport is set
+    // up, so every one of these is a plain read. It used to be null until the
+    // adb gate passed, which is what all the empty-flow fallbacks here were for.
     val session = container.mirrorSession
-    val state by (session?.state ?: kotlinx.coroutines.flow.MutableStateFlow(SessionState.Idle))
-        .collectAsState()
-    val stats by (session?.decoderStats
-        ?: kotlinx.coroutines.flow.MutableStateFlow(dev.alexdev404.droidctl.video.DecoderStats()))
-        .collectAsState()
-    val serverOutput by (session?.serverOutput
-        ?: kotlinx.coroutines.flow.MutableStateFlow(emptyList<dev.alexdev404.droidctl.adb.ProcessLine>()))
-        .collectAsState()
-    val rawDump by (session?.rawDumpPath ?: kotlinx.coroutines.flow.MutableStateFlow(null))
-        .collectAsState()
-    val quality by (session?.quality
-        ?: kotlinx.coroutines.flow.MutableStateFlow(
-            dev.alexdev404.droidctl.model.ConnectionQuality.UNMEASURED_DEFAULT
-        ))
-        .collectAsState()
-    val linkMeasurement by (session?.linkMeasurement ?: kotlinx.coroutines.flow.MutableStateFlow(null))
-        .collectAsState()
-    val network by (session?.network ?: kotlinx.coroutines.flow.MutableStateFlow(null))
-        .collectAsState()
-    val targetDisplay by (session?.targetDisplay ?: kotlinx.coroutines.flow.MutableStateFlow(null))
-        .collectAsState()
+    val state by session.state.collectAsState()
+    val stats by session.decoderStats.collectAsState()
+    val serverOutput by session.serverOutput.collectAsState()
+    val rawDump by session.rawDumpPath.collectAsState()
+    val quality by session.quality.collectAsState()
+    val linkMeasurement by session.linkMeasurement.collectAsState()
+    val network by session.network.collectAsState()
+    val targetDisplay by session.targetDisplay.collectAsState()
     val logLines by LogBuffer.tail.collectAsState()
 
     val logListState = rememberLazyListState()
@@ -109,6 +99,7 @@ fun DebugPaneScreen(container: AppContainer, onBack: () -> Unit) {
             Field("State", state.label)
             Field("scid", connection?.scid ?: "-")
             Field("Target serial", connection?.serial ?: "-")
+            Field("Transport", connection?.transport?.label ?: "-")
             Field("Forwarded port", connection?.hostPort?.let { "127.0.0.1:$it" } ?: "-")
             Field("scrcpy version", ScrcpyProtocol.VERSION)
             Field("adb binary", container.binary?.path ?: "-")

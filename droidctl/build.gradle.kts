@@ -19,6 +19,16 @@ abstract class PackageScrcpyServer : DefaultTask() {
     @get:InputFile
     abstract val serverApk: RegularFileProperty
 
+    /**
+     * The relay from `:relay`, bundled alongside the server.
+     *
+     * Only the SSH transport pushes it -- adb forwards to `localabstract:`
+     * natively and needs no bridge -- but at sixteen kilobytes it is not worth
+     * a second variant of the APK to leave out.
+     */
+    @get:InputFile
+    abstract val relayApk: RegularFileProperty
+
     @get:OutputDirectory
     abstract val outputDir: DirectoryProperty
 
@@ -29,6 +39,9 @@ abstract class PackageScrcpyServer : DefaultTask() {
         dir.mkdirs()
         val jar = dir.resolve("scrcpy-server.jar")
         src.copyTo(jar, overwrite = true)
+
+        val relay = dir.resolve("droidctl-relay.jar")
+        relayApk.get().asFile.copyTo(relay, overwrite = true)
 
         val digest = MessageDigest.getInstance("SHA-256")
         jar.inputStream().use { input ->
@@ -88,10 +101,14 @@ val checkScrcpyVersionPin = tasks.register<CheckScrcpyVersionPin>("checkScrcpyVe
 
 val packageScrcpyServer = tasks.register<PackageScrcpyServer>("packageScrcpyServer") {
     description = "Bundles the scrcpy server built by :server as a DroidCtl asset."
-    dependsOn(":server:assembleRelease", checkScrcpyVersionPin)
+    dependsOn(":server:assembleRelease", ":relay:assembleRelease", checkScrcpyVersionPin)
     serverApk.set(
         rootProject.layout.projectDirectory
             .file("server/build/outputs/apk/release/server-release-unsigned.apk")
+    )
+    relayApk.set(
+        rootProject.layout.projectDirectory
+            .file("relay/build/outputs/apk/release/relay-release-unsigned.apk")
     )
     outputDir.set(layout.buildDirectory.dir("generated/scrcpyServer/assets"))
 }
@@ -167,6 +184,7 @@ dependencies {
     implementation(libs.androidx.datastore.preferences)
     implementation(libs.libsu.core)
     implementation(libs.libsu.io)
+    implementation(libs.jsch)
 
     debugImplementation(libs.androidx.compose.ui.tooling)
 

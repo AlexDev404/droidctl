@@ -75,15 +75,15 @@ fun PairingScreen(container: AppContainer, onDone: () -> Unit) {
         error = null
         scope.launch {
             container.preferences.setLastManualPair("$host:$port")
-            session?.pair(host, port, code)
-                ?.onSuccess {
+            session.pair(host, port, code)
+                .onSuccess {
                     // Do not keep the code around a moment longer than needed.
                     code = ""
                     busy = false
                     status = "Paired with $host:$port. Now connect using the Target's " +
                         "wireless-debugging port (not this pairing port)."
                 }
-                ?.onFailure {
+                .onFailure {
                     busy = false
                     error = it.message
                 }

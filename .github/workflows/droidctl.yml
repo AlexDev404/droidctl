@@ -8,6 +8,7 @@ on:
     paths:
       - 'droidctl/**'
       - 'server/**'
+      - 'relay/**'
       - 'gradle/**'
       - '*.gradle'
       - 'settings.gradle'
@@ -16,6 +17,7 @@ on:
     paths:
       - 'droidctl/**'
       - 'server/**'
+      - 'relay/**'
       - 'gradle/**'
       - '*.gradle'
       - 'settings.gradle'
@@ -50,7 +52,7 @@ jobs:
 
       # One variant per step: it keeps peak memory down, and a failure names the
       # variant instead of leaving two builds interleaved in one log.
-      # Also builds :server, since :droidctl bundles the server it produces.
+      # Also builds :server and :relay, since :droidctl bundles both.
       - name: Build debug
         run: ./gradlew :droidctl:assembleDebug --stacktrace
 

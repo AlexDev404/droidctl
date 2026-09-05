@@ -28,6 +28,13 @@ datastore = "1.2.1"
 # Magisk prompt storm. Hand-rolling that lifecycle correctly is exactly the
 # wheel libsu already implements.
 libsu = "6.0.0"
+# The SSH transport's client. Java ships no SSH, and shelling out to an ssh
+# binary would just swap the adb-ndk install requirement for another one --
+# defeating the point, which is a Host that needs nothing installed and no root.
+# This maintained fork of JSch is chosen over sshj because it has *no*
+# transitive dependencies: sshj drags in BouncyCastle, roughly ten megabytes
+# before shrinking, for API ergonomics this does not need.
+jsch = "2.28.7"
 junit = "4.13.2"
 
 [libraries]
@@ -46,6 +53,7 @@ androidx-compose-material-icons-extended = { module = "androidx.compose.material
 androidx-datastore-preferences = { module = "androidx.datastore:datastore-preferences", version.ref = "datastore" }
 libsu-core = { module = "com.github.topjohnwu.libsu:core", version.ref = "libsu" }
 libsu-io = { module = "com.github.topjohnwu.libsu:io", version.ref = "libsu" }
+jsch = { module = "com.github.mwiede:jsch", version.ref = "jsch" }
 junit = { module = "junit:junit", version.ref = "junit" }
 
 [plugins]

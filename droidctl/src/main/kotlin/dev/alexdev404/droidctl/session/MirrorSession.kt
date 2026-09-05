@@ -4,7 +4,7 @@ import android.content.Context
 import android.view.MotionEvent
 import dev.alexdev404.droidctl.DroidCtlLog
 import dev.alexdev404.droidctl.adb.AdbClient
-import dev.alexdev404.droidctl.adb.ProcessLine
+import dev.alexdev404.droidctl.transport.ProcessLine
 import dev.alexdev404.droidctl.data.DroidCtlPreferences
 import dev.alexdev404.droidctl.data.MirrorSettings
 import dev.alexdev404.droidctl.debug.DebugSupport
@@ -17,6 +17,10 @@ import dev.alexdev404.droidctl.model.ConnectionInfo
 import dev.alexdev404.droidctl.model.ConnectionQuality
 import dev.alexdev404.droidctl.model.QualityMode
 import dev.alexdev404.droidctl.model.KnownTarget
+import dev.alexdev404.droidctl.model.TransportKind
+import dev.alexdev404.droidctl.transport.DeviceTransport
+import dev.alexdev404.droidctl.transport.SshCredentials
+import dev.alexdev404.droidctl.transport.TransportFactory
 import dev.alexdev404.droidctl.scrcpy.ControlChannel
 import dev.alexdev404.droidctl.scrcpy.ControlMessage
 import dev.alexdev404.droidctl.scrcpy.ScrcpyConnection
@@ -37,6 +41,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
@@ -60,14 +65,14 @@ import java.util.Locale
  */
 class MirrorSession(
     private val context: Context,
-    private val adb: AdbClient,
+    private val transports: TransportFactory,
     private val launcher: ScrcpyLauncher,
     private val preferences: DroidCtlPreferences,
     private val scope: CoroutineScope,
 ) {
     private val log = DroidCtlLog.session
 
-    /** Serialises start and stop: a stop racing a start leaks a forward. */
+    /** Serialises start and stop: a stop racing a start leaks a tunnel. */
     private val lifecycleMutex = Mutex()
 
     private val _state = MutableStateFlow<SessionState>(SessionState.Idle)
@@ -131,7 +136,15 @@ class MirrorSession(
      * foreground cycle turns into a reconnect that never settles.
      */
     private var generation = 0
-    private var activeForward: Pair<String, Int>? = null
+
+    /**
+     * The transport this session is running over, held for the whole session.
+     *
+     * One per attempt rather than one per app: an SSH transport owns a live
+     * connection that has to be closed, and a reconnect after the link dropped
+     * has to build a new one rather than reuse the dead one.
+     */
+    private var activeTransport: DeviceTransport? = null
     private var activeTarget: KnownTarget? = null
     private var activeSettings: MirrorSettings = MirrorSettings()
 
@@ -159,6 +172,9 @@ class MirrorSession(
      * makes that session fail in a way that looks like the Target's fault.
      */
     suspend fun clearStaleForwards() {
+        // adb-only: an SSH tunnel dies with the process that opened it, so
+        // there is nothing of that kind to survive a crash.
+        val adb = transports.adb ?: return
         val recorded = preferences.recordedForwards()
         if (recorded.isEmpty()) return
         log.i("Clearing ${recorded.size} stale adb forward(s) from a previous run")
@@ -173,9 +189,22 @@ class MirrorSession(
     // Connect / pair
     // ------------------------------------------------------------------
 
+    /**
+     * adb, for the operations only adb has: pairing, `adb connect`, the device
+     * list.
+     *
+     * Throws rather than returning null because reaching any of these without a
+     * working adb means the UI offered an adb-mode action on a Host that failed
+     * the adb gate, and a message saying so is far more use than a silent
+     * no-op.
+     */
+    private fun requireAdb(): AdbClient = transports.requireAdb()
+
     suspend fun pair(host: String, port: Int, code: String): Result<Unit> {
         _state.value = SessionState.Pairing("$host:$port")
-        val result = adb.pair(host, port, code)
+        val result = runCatching { requireAdb() }.mapCatching { adb ->
+            adb.pair(host, port, code).getOrThrow()
+        }
         _state.value = result.fold(
             onSuccess = { SessionState.Idle },
             onFailure = { SessionState.Failed("pair", it.message ?: "Pairing failed", cause = it) },
@@ -186,6 +215,10 @@ class MirrorSession(
     /** Runs `adb connect` and remembers the Target on success. */
     suspend fun connectTarget(host: String, port: Int, name: String?): Result<KnownTarget> {
         _state.value = SessionState.Connecting("$host:$port")
+        val adb = runCatching { requireAdb() }.getOrElse { error ->
+            _state.value = SessionState.Failed("connect", error.message ?: "adb is unavailable", cause = error)
+            return Result.failure(error)
+        }
         return adb.connect(host, port)
             .mapCatching { serial ->
                 val devices = adb.devices().getOrDefault(emptyList())
@@ -198,6 +231,7 @@ class MirrorSession(
                     host = host,
                     port = port,
                     lastConnectedAtMillis = System.currentTimeMillis(),
+                    transport = TransportKind.Adb,
                 ).also { preferences.rememberTarget(it) }
             }
             .onSuccess { _state.value = SessionState.Idle }
@@ -206,6 +240,75 @@ class MirrorSession(
                     SessionState.Failed("connect", it.message ?: "Could not connect", cause = it)
             }
     }
+
+    /**
+     * Verifies an SSH login and remembers the Target on success.
+     *
+     * The counterpart to [connectTarget]: there is no `adb connect` to run, but
+     * the same thing has to happen -- prove the Host can actually reach the
+     * Target before handing the user a card that starts a mirroring session.
+     *
+     * The entry is saved *before* the connection is attempted, because the host
+     * key pinned on first use has to attach to a stored Target; a login that
+     * fails leaves behind an entry the user can retry or forget, which is the
+     * same thing a failed `adb connect` leaves in the adb server.
+     */
+    suspend fun connectSshTarget(
+        host: String,
+        port: Int,
+        user: String,
+        name: String?,
+    ): Result<KnownTarget> {
+        val account = user.trim().ifBlank { SshCredentials.DEFAULT_USER }
+        _state.value = SessionState.Connecting("$account@$host:$port")
+
+        val candidate = KnownTarget(
+            name = name?.trim()?.ifBlank { null } ?: "$host:$port",
+            host = host,
+            port = port,
+            lastConnectedAtMillis = System.currentTimeMillis(),
+            transport = TransportKind.Ssh,
+            sshUser = account,
+        )
+        preferences.rememberTarget(candidate)
+        val stored = storedTarget(candidate)
+
+        return transports.open(stored)
+            .mapCatching { transport ->
+                // Closed again straight away: this is a probe, and a session
+                // started later opens its own connection. Holding an idle SSH
+                // session open between screens would only give it time to be
+                // dropped by a NAT or an sshd timeout, and be discovered as a
+                // failure at the worst moment.
+                transport.use {
+                    // Cheap, present on every Android build, and it doubles as
+                    // proof that the login lands somewhere that can run
+                    // commands rather than a shell that immediately exits.
+                    val model = it.exec("getprop ro.product.model").getOrNull()?.trim()
+                    log.i("SSH login to ${transport.description} succeeded${model?.let { m -> " ($m)" } ?: ""}")
+                    model
+                }
+            }
+            .mapCatching { model ->
+                val named = stored.copy(
+                    name = name?.trim()?.ifBlank { null }
+                        ?: model?.ifBlank { null }
+                        ?: stored.name,
+                )
+                preferences.rememberTarget(named)
+                // Re-read, so the caller gets the host key that was just pinned.
+                storedTarget(named)
+            }
+            .onSuccess { _state.value = SessionState.Idle }
+            .onFailure {
+                _state.value =
+                    SessionState.Failed("connect", it.message ?: "Could not connect", cause = it)
+            }
+    }
+
+    /** The persisted entry for [target], or [target] itself if it has gone. */
+    private suspend fun storedTarget(target: KnownTarget): KnownTarget =
+        preferences.knownTargets.first().firstOrNull { it.serial == target.serial } ?: target
 
     // ------------------------------------------------------------------
     // Mirroring
@@ -267,13 +370,21 @@ class MirrorSession(
                 return
             }
 
+            _state.value =
+                SessionState.Preparing(target, "Reaching the Target over ${target.transport.label}")
+            val transport = transports.open(target).getOrElse { error ->
+                failLocked("open-transport", error, serverOutputLines())
+                return
+            }
+            activeTransport = transport
+
             _state.value = SessionState.Preparing(target, "Delivering the scrcpy server")
 
             // Only pushed when the Target does not already have this exact jar.
             // When it is pushed, the transfer doubles as the bandwidth probe --
             // it is the only sizeable transfer before the video stream exists.
             val delivery = launcher.ensureServerOnTarget(
-                serial = target.serial,
+                transport = transport,
                 allowSkip = !settings.alwaysPushServer,
             ).getOrElse { error ->
                 failLocked("push-server", error, serverOutputLines())
@@ -289,9 +400,7 @@ class MirrorSession(
                 _state.value = SessionState.Preparing(target, "Reading the Target's screen size")
                 // max_size is absolute while a rung is a fraction of the
                 // Target's own screen, so that size is needed before launching.
-                _targetDisplay.value = adb.displaySize(target.serial)
-                    .onFailure { log.w("Could not read the Target's display size: ${it.message}") }
-                    .getOrNull()
+                _targetDisplay.value = readDisplaySize(transport)
             }
 
             _quality.value = resolveQuality(
@@ -304,13 +413,11 @@ class MirrorSession(
             val scoped = log.withScid(options.socketName)
 
             _state.value = SessionState.Preparing(target, "Starting the scrcpy server")
-            val handle = launcher.launch(target.serial, options).getOrElse { error ->
+            val handle = launcher.launch(transport, options).getOrElse { error ->
                 failLocked("start-server", error, serverOutputLines())
                 return
             }
             serverHandle = handle
-            activeForward = handle.serial to handle.hostPort
-            preferences.recordForward(handle.serial, handle.hostPort)
             serverLogJob = scope.launch {
                 handle.output.collect { line ->
                     _serverOutput.value = (_serverOutput.value + line).takeLast(SERVER_LOG_LINES)
@@ -343,7 +450,7 @@ class MirrorSession(
         sessionGeneration: Int,
     ) {
         val scoped = log.withScid(options.socketName)
-        val info = ConnectionInfo(target.serial, hostPort, options.socketName, options)
+        val info = ConnectionInfo(target.serial, target.transport, hostPort, options.socketName, options)
         _state.value = SessionState.StartingServer(target, info)
         _state.value = SessionState.AwaitingSockets(target, info)
 
@@ -390,6 +497,23 @@ class MirrorSession(
                 "(${opened.meta.codecName} ${opened.meta.width}x${opened.meta.height})"
         )
     }
+
+    /**
+     * The Target's screen size, via `wm size`.
+     *
+     * Read through the transport rather than through adb, because it is needed
+     * in both modes and `wm` is a Target-side command either way. A failure is
+     * logged and tolerated: without a size a rung falls back to its absolute
+     * cap, which is worse than scaling but far better than not connecting.
+     */
+    private suspend fun readDisplaySize(transport: DeviceTransport): DisplaySize? = transport
+        .exec("wm size")
+        .mapCatching { output ->
+            AdbClient.parseDisplaySize(output.lines())
+                ?: throw IOException("Could not parse `wm size` output: ${output.trim()}")
+        }
+        .onFailure { log.w("Could not read the Target's display size: ${it.message}") }
+        .getOrNull()
 
     /**
      * The rung to launch on, and a log line saying why.
@@ -670,8 +794,10 @@ class MirrorSession(
      *    before its encoder loses the socket it writes to;
      * 2. the decoder and its handler thread;
      * 3. the `app_process` invocation on the Target;
-     * 4. `adb forward --remove`, and its record in DataStore;
-     * 5. optionally `adb disconnect`.
+     * 4. the tunnel (an `adb forward --remove` and its DataStore record, or the
+     *    SSH forward and the relay behind it);
+     * 5. the transport itself;
+     * 6. optionally `adb disconnect`.
      */
     private suspend fun teardownLocked(disconnectAdb: Boolean) {
         stopping = true
@@ -715,29 +841,40 @@ class MirrorSession(
         serverLogJob?.cancel()
         serverLogJob = null
 
-        runCatching { serverHandle?.process?.close() }
+        val handle = serverHandle
+        runCatching { handle?.process?.close() }
             .onFailure { log.w("Could not stop the scrcpy server process", it) }
 
         runCatching { fakeEndpoint?.close() }
             .onFailure { log.w("Could not stop the fake server", it) }
         fakeEndpoint = null
 
-        activeForward?.let { (serial, port) ->
-            adb.removeForward(serial, port)
-                .onFailure { log.w("Could not remove forward tcp:$port on $serial: ${it.message}") }
-            preferences.clearForwardRecord(serial, port)
+        // After the server process, so nothing is still writing through it, and
+        // before the transport, which is what the tunnel is built on.
+        val transport = activeTransport
+        if (handle != null && transport != null) {
+            runCatching { transport.closeTunnel(handle.tunnel) }
+                .onFailure { log.w("Could not close the tunnel (${handle.tunnel})", it) }
         }
-        activeForward = null
         serverHandle = null
+
+        runCatching { transport?.close() }
+            .onFailure { log.w("Could not close the transport", it) }
+        activeTransport = null
 
         touchMapper.reset()
         targetSize = null
 
         if (disconnectAdb) {
-            activeTarget?.let { target ->
-                adb.disconnect(target.serial)
-                    .onFailure { log.d("adb disconnect ${target.serial}: ${it.message}") }
-            }
+            // Only adb has a connection of its own to drop; an SSH session is
+            // already gone with the transport closed just above.
+            val adb = transports.adb
+            activeTarget
+                ?.takeIf { it.transport == TransportKind.Adb }
+                ?.let { target ->
+                    adb?.disconnect(target.serial)
+                        ?.onFailure { log.d("adb disconnect ${target.serial}: ${it.message}") }
+                }
         }
     }
 

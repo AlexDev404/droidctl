@@ -43,6 +43,34 @@ data class KnownTarget(
      * every session after the first.
      */
     val lastMeasuredBitsPerSecond: Long? = null,
+    /** Which way this Target is reached. */
+    val transport: TransportKind = TransportKind.Adb,
+    /**
+     * The account to log in as in [TransportKind.Ssh] mode, or null for the
+     * transport's own default.
+     *
+     * Null rather than the literal `shell` so the default lives in exactly one
+     * place -- next to the transport that knows *why* it is `shell` -- while
+     * this stays a plain data class the persistence layer can round-trip.
+     */
+    val sshUser: String? = null,
+    /**
+     * The Target's SSH host key, base64, recorded on the first connection.
+     *
+     * Trust on first use, exactly as any ssh client does: once this is set it
+     * must match, so a different machine answering on that address is refused
+     * rather than silently mirrored.
+     */
+    val sshHostKey: String? = null,
 ) {
+    /**
+     * The stable identity of a Target, and its adb serial in [TransportKind.Adb]
+     * mode.
+     *
+     * `host:port` in both modes, so a device reached over SSH on 22 and the same
+     * device reached over adb on its wireless-debugging port are two entries --
+     * which is right: they need different things set up and can fail
+     * independently.
+     */
     val serial: String get() = "$host:$port"
 }

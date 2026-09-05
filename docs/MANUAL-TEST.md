@@ -4,11 +4,23 @@ Everything in this list needs two physical devices and cannot be covered by the
 automated tests. Work through it in order: a failure at step *n* makes every
 later step meaningless.
 
-**Host** — the rooted device running DroidCtl (Magisk + the `adb-ndk` module).
-**Target** — the stock, unrooted device being mirrored, with *Wireless
-debugging* enabled in Developer options.
+**Host** — the device running DroidCtl.
+**Target** — the device being mirrored.
 
-Both must be on the same network, and that network must not have client
+What each has to be depends on the connection mode, and the two are mirror
+images of each other:
+
+| | **ADB** | **SSH** |
+|---|---|---|
+| Host | rooted (Magisk + the `adb-ndk` module) | anything |
+| Target | stock and unrooted, *Wireless debugging* on | rooted, running an sshd |
+
+Sections 1–5 are mode-specific and say which mode they are for. Sections 6
+onwards are the same in both, and **should be run once per mode**: everything
+above the transport is shared code, so a failure there is a bug in both, and a
+failure in only one is a bug in that transport.
+
+Both devices must be on the same network, and that network must not have client
 isolation enabled (a lot of guest and hotel Wi-Fi does).
 
 Where a step names a log tag, open **Settings → Open the debug pane** on the
@@ -17,7 +29,7 @@ the Host works too if you have a third machine.
 
 ---
 
-## 1. First-run gate
+## 1. First-run gate (ADB mode)
 
 | # | Do this | Expect | Log tag |
 |---|---|---|---|
@@ -26,10 +38,36 @@ the Host works too if you have a third machine.
 | 1.3 | Deny superuser instead (revoke it in Magisk, force-stop, relaunch) | "This app requires root", with the Magisk remediation. **Not** a blank screen | `DroidCtl/Adb` |
 | 1.4 | Temporarily rename `/system/xbin/adb` (a Magisk module change, so reboot) | "No adb binary found", naming the adb-ndk module and its URL, listing the paths searched | `DroidCtl/Adb` |
 
-If 1.2 fails, nothing else can work. The message shows adb's own stderr
-verbatim; that text is the diagnosis.
+If 1.2 fails, nothing else can work in ADB mode. The message shows adb's own
+stderr verbatim; that text is the diagnosis.
 
-## 2. Pairing
+| # | Do this | Expect | Log tag |
+|---|---|---|---|
+| 1.5 | On any gate failure, tap **Connect over SSH instead** | The app goes straight to the connect screen with SSH selected. No root prompt, no gate | `DroidCtl/Session` |
+| 1.6 | Switch back to ADB on a Host that fails the gate | The gate screen returns with the same explanation, rather than a connect screen whose buttons all fail | `DroidCtl/Adb` |
+
+Step 1.5 is the whole point of SSH mode: it has to work on a Host that will
+never pass the gate above, so run it on an **unrooted** Host at least once.
+
+## 1b. SSH setup (SSH mode)
+
+| # | Do this | Expect | Log tag |
+|---|---|---|---|
+| 1b.1 | Select **SSH** on the connect screen | The mDNS and `adb devices` sections disappear; an address field, an account field and the Host's public key appear | — |
+| 1b.2 | Watch the key card on first use | "Generating a key pair..." briefly, then one `ssh-rsa AAAA... droidctl` line. It must be the **same** line on every later launch | `DroidCtl/Adb` |
+| 1b.3 | Tap **Copy**, paste it somewhere | The full line arrives intact, no truncation, no wrapping | — |
+| 1b.4 | Put that line in the Target's `/data/adb/ssh/shell/.ssh/authorized_keys` (or MagiskSSH's key manager) | — | — |
+| 1b.5 | Look for the private key anywhere outside the app | It is only at `/data/data/dev.alexdev404.droidctl/files/ssh/`, and there is no UI anywhere that shows or exports it | — |
+| 1b.6 | Connect **before** installing the key | Refused, with the sshd's own reason. Not a hang, not a blank failure | `DroidCtl/Adb` |
+| 1b.7 | Connect after installing it | Succeeds; the Target's name in the list becomes its `ro.product.model` | `DroidCtl/Adb` |
+| 1b.8 | Connect a second time | Succeeds with no prompt and no key regeneration | `DroidCtl/Adb` |
+| 1b.9 | Point the same host:port at a *different* machine (change the Target's sshd host key, or reuse the address) | Refused because the pinned host key no longer matches. **Not** silently accepted | `DroidCtl/Adb` |
+| 1b.10 | Forget that Target and add it again | Accepted, pinning the new key — the deliberate way out of 1b.9 | `DroidCtl/Adb` |
+
+Steps 1b.5 and 1b.9 are security checks, not niceties: verify them by eye every
+time this code path changes.
+
+## 2. Pairing (ADB mode)
 
 | # | Do this | Expect | Log tag |
 |---|---|---|---|
@@ -41,7 +79,7 @@ verbatim; that text is the diagnosis.
 Step 2.3 is a privacy check, not a nicety: verify it by eye every time this code
 path changes.
 
-## 3. Connecting
+## 3. Connecting (ADB mode)
 
 | # | Do this | Expect | Log tag |
 |---|---|---|---|
@@ -51,7 +89,18 @@ path changes.
 | 3.4 | Reboot the Target and try the saved entry again | Connect fails; the message should lead you to re-read the port, which changes on reboot | `DroidCtl/Adb` |
 | 3.5 | Restart the app | The Target is remembered and reconnects with one tap | `DroidCtl/Session` |
 
-## 4. mDNS discovery
+## 3b. Connecting (SSH mode)
+
+| # | Do this | Expect | Log tag |
+|---|---|---|---|
+| 3b.1 | Enter the Target's IP with no port, tap Connect | Treated as port 22, which is what people type | `DroidCtl/Adb` |
+| 3b.2 | Leave the account field empty | Defaults to `shell`, and the screen says why: uid 2000 is what `adb shell` gives | — |
+| 3b.3 | Connect as `root` instead | Works, and mirroring still works — the server calls `setuid(2000)` on itself regardless | `DroidCtl/Server` |
+| 3b.4 | Enter an address nothing is listening on | Fails within the connect timeout with a reachable-sounding message, not a hang | `DroidCtl/Adb` |
+| 3b.5 | Restart the app | The Target is remembered, listed as `SSH host:22`, and reconnects with one tap | `DroidCtl/Session` |
+| 3b.6 | Add the same device in both modes | Two entries, each labelled with its mode. Neither hides the other, and switching the toggle hides neither | — |
+
+## 4. mDNS discovery (ADB mode)
 
 | # | Do this | Expect | Log tag |
 |---|---|---|---|
@@ -190,13 +239,16 @@ crash as well as after a clean exit.
 
 | # | Do this | Expect |
 |---|---|---|
-| 9.1 | Exit the mirror screen, then from another machine run `adb -s <target> forward --list` against the Host's adb server | No `scrcpy_*` forwards left |
-| 9.2 | On the Target, check for a running server: `ps -A \| grep app_process` | No scrcpy server process |
+| 9.1 | (ADB) Exit the mirror screen, then from another machine run `adb -s <target> forward --list` against the Host's adb server | No `scrcpy_*` forwards left |
+| 9.2 | On the Target, check for a running server: `ps -A \| grep app_process` | No scrcpy server process — **and in SSH mode no `Relay` process either** |
 | 9.3 | Connect and disconnect ten times in a row | Every session starts; no "address already in use", no growing list of forwards |
 | 9.4 | Force-stop DroidCtl mid-session, relaunch | The log shows `Clearing N stale adb forward(s) from a previous run`, and the next session starts cleanly |
 | 9.5 | Mirror, then turn Wi-Fi off on the Target | The session reports reconnect attempts, then fails with a message naming the stage |
 | 9.6 | Turn Wi-Fi back on and reconnect | Works without restarting the app |
 | 9.7 | Rotate the Host repeatedly during a session | No decoder leak: frames decoded keeps climbing, dropped does not spike |
+| 9.8 | (SSH) Mirror, exit, and on the Target run `netstat -tlnp \| grep 127.0.0.1` | No relay left listening on a loopback port |
+| 9.9 | (SSH) Ten sessions in a row, then check the Target's process list | No accumulation of `Relay` processes, and no growing list of `app_process` ones |
+| 9.10 | (SSH) Kill the sshd on the Target mid-session | The session reports reconnect attempts and then fails naming the stage, rather than hanging on a dead channel |
 
 ## 10. Battery and screen
 
@@ -211,4 +263,5 @@ crash as well as after a clean exit.
 | # | Do this | Expect |
 |---|---|---|
 | 11.1 | Settings → Open source licenses | scrcpy is listed with version 4.1, Genymobile's copyright and the upstream URL |
+| 11.3 | Confirm the pushed jars are unmodified | `sha256sum /data/local/tmp/scrcpy-server.jar` on the Target matches the `scrcpy-server.jar.sha256` asset; the relay is DroidCtl's own code, not a third party's |
 | 11.2 | Tap "Show license text" under scrcpy | The full Apache License 2.0 text is shown, read from the bundled asset |

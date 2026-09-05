@@ -147,6 +147,49 @@ adb -s <serial> shell CLASSPATH=/data/local/tmp/scrcpy-server.jar \
     send_device_meta=true send_frame_meta=true send_dummy_byte=true send_stream_meta=true
 ```
 
+### The same launch over SSH
+
+Nothing above the tunnel changes: the same jar at the same path, the same
+`app_process` command line, the same handshake on the same kind of loopback
+socket. Only the two adb-specific lines are replaced.
+
+The push becomes SFTP and the `adb shell` becomes an SSH exec channel, both
+direct swaps. The forward is not, because of one gap: scrcpy's
+`DesktopConnection` listens on `LocalServerSocket("scrcpy_<scid>")`, which is
+Linux's **abstract** socket namespace, and OpenSSH's `-L` reaches TCP ports and
+*filesystem* unix sockets but not abstract ones. `adb forward ...
+localabstract:` speaks the abstract namespace natively, which is why the adb
+path needs nothing here.
+
+`:relay` bridges that last hop, on the Target:
+
+```
+scp droidctl-relay.jar → /data/local/tmp/droidctl-relay.jar
+ssh CLASSPATH=/data/local/tmp/droidctl-relay.jar app_process / \
+    dev.alexdev404.droidctl.relay.Relay scrcpy_<scid>
+    → prints "RELAY_PORT <n>" on its first line of stdout
+ssh -L <hostPort>:127.0.0.1:<n>
+```
+
+It binds 127.0.0.1 only — the tunnel terminates on that device, so binding
+anywhere else would expose the Target's screen to the whole network — and asks
+for an ephemeral port rather than guessing what is free on a device we do not
+otherwise inspect, which is what the `RELAY_PORT` line is for.
+
+It accepts in a loop rather than exactly twice, so it carries no assumption
+about how many sockets the client opens, and each direction of each connection
+is pumped on its own thread with an independent `shutdownOutput`. That last
+detail is load-bearing: scrcpy closes its **control** socket before its video
+socket during teardown, so tearing both directions down at the first close would
+truncate the video stream mid-frame.
+
+A connection that arrives before the server is listening is closed without
+anything written, which the client already reads as "not up yet" and retries —
+the same signal `adb forward` produces in that state.
+
+The scrcpy jar itself is untouched, and nothing is installed on the Target
+beyond the two jars in `/data/local/tmp/`.
+
 `scid` is a random **31-bit** value formatted as `%08x`. `Options.parse` reads it
 with `Integer.parseInt(value, 16)`, which overflows on a value with bit 31 set
 and then rejects the negative result — so the top bit must be clear

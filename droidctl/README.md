@@ -1,18 +1,50 @@
 # DroidCtl
 
-A native Android app that mirrors and controls a **second** Android device over
-wireless ADB, using the scrcpy server as the on-target agent.
+A native Android app that mirrors and controls a **second** Android device,
+using the scrcpy server as the on-target agent.
 
 Two devices, and the distinction matters everywhere in this code:
 
 | Term | Meaning |
 |---|---|
-| **Host** | The Android device running DroidCtl. Rooted (Magisk), with the [`adb-ndk`](https://github.com/Magisk-Modules-Repo/adb-ndk) module providing a static `adb` at `/system/xbin/adb`. The device the user holds. |
-| **Target** | The Android device being mirrored. Unrooted, stock, unmodified, with *Wireless debugging* enabled. Nothing is permanently installed on it. |
+| **Host** | The Android device running DroidCtl. The device the user holds. |
+| **Target** | The Android device being mirrored. |
 
-DroidCtl is a GUI wrapper around three things: shelling out to `adb` as root, a
+DroidCtl is a GUI wrapper around three things: getting a shell on the Target, a
 `MediaCodec` decoder rendering to a `Surface`, and a touch/key serializer
 speaking scrcpy's control protocol. The novelty is the assembly.
+
+## Connection modes
+
+There are two ways to get that shell, chosen with a toggle on the connect screen
+and in settings. They are not a fast path and a fallback: they need root on
+**different devices**, so which one is usable is decided by what you have.
+
+| | **ADB** | **SSH** |
+|---|---|---|
+| Host | rooted (Magisk), with [`adb-ndk`](https://github.com/Magisk-Modules-Repo/adb-ndk) providing `/system/xbin/adb` | nothing — no root |
+| Target | stock and unmodified, *Wireless debugging* on | rooted, running an sshd ([MagiskSSH](https://github.com/powerAn2020/Patched-MagiskSSH)) |
+| Setup | pair once with a code | paste one public key into `authorized_keys` |
+
+ADB is the original mode and still the one to prefer when the Host is rooted:
+nothing is installed on the Target and nothing is left behind on it.
+
+SSH exists for the case ADB cannot serve — an unrooted Host — and logs in as
+`shell` by default, landing in the same uid 2000 that `adb shell` provides,
+which is the privilege level the scrcpy server is built for. (The server would
+demote itself anyway: `Server.dropRootPrivileges` calls `setuid(2000)` because
+copy-paste does not work as root.)
+
+The one thing SSH cannot do that adb can is reach Linux's **abstract** socket
+namespace, where scrcpy listens: `adb forward ... localabstract:` speaks it
+natively, OpenSSH's `-L` does not. `:relay` closes that gap — see below.
+
+Authentication is key-based only. The app generates an RSA-3072 key pair on
+first use, keeps the private half in app-private storage, and never offers to
+import one: a key the app generated cannot have been copied off another machine.
+The Target's host key is pinned on first connection and required to match
+afterwards, so a different machine answering on that address is refused rather
+than silently mirrored.
 
 ## Build
 
@@ -48,13 +80,15 @@ runtime abort on the Target.
 
 ```
 adb/       AdbBinary, AdbCommand, AdbClient, AdbDiscovery, RootShellSession
+transport/ DeviceTransport (+ Tunnel, RemoteProcess), AdbTransport, SshTransport,
+           SshKeyStore, RelayAsset, TransportFactory
 scrcpy/    ScrcpyServerAsset, ScrcpyOptions, ScrcpyLauncher, ScrcpyConnection,
            VideoStream, ControlChannel, ControlMessage
 video/     VideoDecoder, VideoSink/VideoStreamPump, SurfaceHolderBridge, RawStreamDump
 input/     TouchMapper (+ ViewportMapping), MotionEventAdapter, KeyMapper
 session/   MirrorSession, SessionState
 ui/        discovery/ pairing/ mirror/ settings/ common/
-model/     Target, ConnectionInfo
+model/     Target, ConnectionInfo, TransportKind
 data/      DroidCtlPreferences (DataStore)
 debug/     FakeServerEndpoint; DebugSupport has separate debug/ and release/ bodies
 ```
@@ -62,6 +96,20 @@ debug/     FakeServerEndpoint; DebugSupport has separate debug/ and release/ bod
 `droidctl/src/debug/` holds `FakeScrcpyServer` and the recorded sample stream;
 `droidctl/src/release/` holds the release-build stub that reports the fake server
 as unavailable.
+
+`:relay` is a sibling Gradle module, not part of this one: a ~150-line plain-Java
+program that runs on the **Target** under `app_process`, listens on a loopback
+TCP port there and forwards each connection to scrcpy's abstract socket. Only
+the SSH transport pushes it. It is plain Java and minified for size — it crosses
+the same link you are about to mirror over, and AGP 9 adds the Kotlin stdlib
+even to a pure-Java module, which took it from 16.8 KB to 650 KB until
+`minifyEnabled` was turned on for it.
+
+`DeviceTransport` is the seam the two modes meet at: push a file, run a command,
+run a long-lived command, open a tunnel onto an abstract socket. Everything
+above it — `ScrcpyLauncher`, `MirrorSession`, the whole video path — is
+identical in both modes, and `ScrcpyLauncherTest` exercises that claim against a
+transport that is neither.
 
 ## Connection quality
 
@@ -95,27 +143,38 @@ The debug pane shows the measurement, the chosen rung, the resulting
 
 ## How a session works
 
-1. `adb connect <host>:<port>` — Target appears in `adb devices`.
+1. Open a transport to the Target: `adb connect <host>:<port>`, or an SSH login.
 2. Extract `scrcpy-server.jar` from assets and verify its SHA-256; push it to
-   `/data/local/tmp/` only if the Target's copy differs, timing the transfer as
-   the bandwidth probe.
+   `/data/local/tmp/`, timing the transfer as the bandwidth probe. (Skipped when
+   the Target's copy already matches and *Re-send the server every session* is
+   off.)
 3. Read `wm size` and pick the quality rung.
-4. Bind an ephemeral local port, then
-   `adb forward tcp:<port> localabstract:scrcpy_<scid>`.
-5. `adb shell CLASSPATH=... app_process / com.genymobile.scrcpy.Server 4.1 ...`,
-   kept as a live handle so its stdout/stderr reach the debug pane.
+4. Open a tunnel from a Host loopback port onto `localabstract:scrcpy_<scid>`.
+5. Run `CLASSPATH=... app_process / com.genymobile.scrcpy.Server 4.1 ...` on the
+   Target, kept as a live handle so its stdout/stderr reach the debug pane.
 6. Connect two ordinary `java.net.Socket`s to `127.0.0.1:<port>` — **video
    first, control second** — read the dummy byte, the 64-byte device name, the
    codec id and the first session record.
 7. Feed the video socket to `MediaCodec` in async mode, rendering to the mirror
    `SurfaceView`; serialize touches and keys onto the control socket.
 
-Only the adb invocations need root. The data path is unprivileged.
+Steps 4 and 5 are where the two modes differ, and only there:
+
+| | ADB | SSH |
+|---|---|---|
+| Tunnel | bind an ephemeral local port, then `adb forward tcp:<port> localabstract:scrcpy_<scid>` | push `droidctl-relay.jar`, run it under `app_process` on the Target, read the port it prints, then `ssh -L <local> → 127.0.0.1:<that port>` |
+| Command | `adb shell <command>` | an SSH exec channel |
+
+Only the adb invocations need root on the Host, and only in ADB mode. The data
+path is unprivileged in both.
 
 Teardown runs on every exit path, is idempotent, and goes: control socket, video
-socket, decoder and its handler thread, the `app_process` invocation, `adb
-forward --remove`, and optionally `adb disconnect`. Forwards this app creates are
-recorded in DataStore so a crashed run's leftovers can be cleared at next start.
+socket, decoder and its handler thread, the `app_process` invocation, the tunnel
+(`adb forward --remove` and its DataStore record, or the SSH forward and the
+relay behind it), the transport itself, and optionally `adb disconnect`. Forwards
+this app creates are recorded in DataStore so a crashed run's leftovers can be
+cleared at next start; an SSH tunnel needs no such record, because it dies with
+the process that opened it.
 
 ## Verification
 
@@ -127,6 +186,9 @@ Automated, on the JVM, no device needed:
   Target, letterboxing on both axes, multi-pointer sequences, and margin taps.
 * **Option keys** checked against the `case` labels in the server's
   `Options.parse` — the server aborts on an unknown key.
+* **`ScrcpyLauncher` over a fake transport**: the push-or-skip decision, the
+  `app_process` command line, and that a failed launch never leaks the tunnel it
+  had already opened.
 
 On a single device, no Target needed:
 
@@ -143,7 +205,7 @@ Everything else — real pairing, real root, real injection on a Target — is i
 ## Not in v1
 
 USB/OTG, audio forwarding, clipboard sync, file transfer, UHID keyboard
-passthrough, recording to file, multiple simultaneous Targets, and any support
-for an unrooted Host. The module boundaries leave room for audio and clipboard
+passthrough, recording to file, multiple simultaneous Targets, and mirroring a
+Target that is neither reachable by a rooted Host's adb nor running an sshd. The module boundaries leave room for audio and clipboard
 (`ScrcpyOptions` and `ControlMessage` are where each would start), but neither
 ships.

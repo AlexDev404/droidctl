@@ -11,6 +11,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -29,12 +30,18 @@ import dev.alexdev404.droidctl.adb.AdbSetupFailure
 import dev.alexdev404.droidctl.ui.common.MonospaceBlock
 
 /**
- * The first-run gate.
+ * The first-run gate for ADB mode.
  *
  * Checks root, then the adb binary, then that adb actually runs, and blocks on
  * the first failure with the remediation for exactly that failure. The one
  * outcome this screen must never produce is an empty screen with no
  * explanation.
+ *
+ * Every failure here is about the **Host**, and none of them applies to SSH
+ * mode, so each one also offers the way out: a Host that will never be rooted
+ * can still mirror a Target that is. That offer is on the failure itself rather
+ * than tucked away in settings, because this screen is where a user who cannot
+ * meet the ADB requirements actually ends up.
  */
 @Composable
 fun FirstRunGateScreen(
@@ -42,6 +49,7 @@ fun FirstRunGateScreen(
     failure: AdbSetupFailure?,
     adbVersionProbe: suspend () -> String?,
     onRetry: () -> Unit,
+    onUseSsh: () -> Unit,
 ) {
     var version by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(checking, failure) {
@@ -61,7 +69,7 @@ fun FirstRunGateScreen(
             Text("DroidCtl", style = MaterialTheme.typography.headlineMedium)
             Spacer(Modifier.height(8.dp))
             Text(
-                "Mirror and control a second Android device over wireless ADB.",
+                "Mirror and control a second Android device over wireless ADB, or over SSH.",
                 style = MaterialTheme.typography.bodyMedium,
                 textAlign = TextAlign.Center,
             )
@@ -80,14 +88,14 @@ fun FirstRunGateScreen(
                     version?.let { MonospaceBlock(it) }
                 }
 
-                else -> GateFailure(failure = failure, onRetry = onRetry)
+                else -> GateFailure(failure = failure, onRetry = onRetry, onUseSsh = onUseSsh)
             }
         }
     }
 }
 
 @Composable
-private fun GateFailure(failure: AdbSetupFailure, onRetry: () -> Unit) {
+private fun GateFailure(failure: AdbSetupFailure, onRetry: () -> Unit, onUseSsh: () -> Unit) {
     val (title, explanation, detail) = when (failure) {
         is AdbSetupFailure.NoRoot -> Triple(
             "This app requires root",
@@ -121,4 +129,13 @@ private fun GateFailure(failure: AdbSetupFailure, onRetry: () -> Unit) {
     Button(onClick = onRetry, contentPadding = PaddingValues(horizontal = 32.dp, vertical = 12.dp)) {
         Text("Try again")
     }
+    Spacer(Modifier.height(24.dp))
+    Text(
+        "None of this applies over SSH: that mode needs nothing on this device, " +
+            "but the Target must be rooted and running an sshd.",
+        style = MaterialTheme.typography.bodySmall,
+        textAlign = TextAlign.Center,
+    )
+    Spacer(Modifier.height(8.dp))
+    OutlinedButton(onClick = onUseSsh) { Text("Connect over SSH instead") }
 }

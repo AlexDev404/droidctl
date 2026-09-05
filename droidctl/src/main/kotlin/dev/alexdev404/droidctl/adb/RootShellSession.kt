@@ -3,6 +3,8 @@ package dev.alexdev404.droidctl.adb
 import com.topjohnwu.superuser.CallbackList
 import com.topjohnwu.superuser.Shell
 import dev.alexdev404.droidctl.DroidCtlLog
+import dev.alexdev404.droidctl.transport.ProcessLine
+import dev.alexdev404.droidctl.transport.RemoteProcess
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -141,7 +143,7 @@ class RootProcess private constructor(
     private val shell: Shell,
     private val label: String,
     private val owner: RootShellSession,
-) {
+) : RemoteProcess {
     private val log = DroidCtlLog.server
     private val closed = AtomicBoolean(false)
 
@@ -158,7 +160,7 @@ class RootProcess private constructor(
     )
 
     /** stdout and stderr of the command, interleaved, in arrival order. */
-    val output: SharedFlow<ProcessLine> = _output.asSharedFlow()
+    override val output: SharedFlow<ProcessLine> = _output.asSharedFlow()
 
     /** Exit code once the command has terminated, null while it is running. */
     val terminatedWith: Int? get() = exitCode
@@ -166,7 +168,7 @@ class RootProcess private constructor(
     val isRunning: Boolean get() = exitCode == null && !closed.get()
 
     /** Everything the process has printed so far, oldest first. */
-    fun snapshot(): List<ProcessLine> = _output.replayCache
+    override fun snapshot(): List<ProcessLine> = _output.replayCache
 
     /**
      * Terminates the command and releases its shell.
@@ -175,7 +177,7 @@ class RootProcess private constructor(
      * which closes the server's sockets, which is how the scrcpy server on the
      * Target learns to exit. Idempotent.
      */
-    suspend fun close() {
+    override suspend fun close() {
         if (!closed.compareAndSet(false, true)) return
         val pidToKill = pid
         if (pidToKill != null && exitCode == null) {
@@ -250,6 +252,3 @@ class RootProcess private constructor(
         }
     }
 }
-
-/** One line of output from a [RootProcess]. */
-data class ProcessLine(val text: String, val isError: Boolean)

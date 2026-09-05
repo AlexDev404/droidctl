@@ -7,9 +7,11 @@ import dev.alexdev404.droidctl.scrcpy.ScrcpyOptions
  * teardown.
  */
 data class ConnectionInfo(
-    /** The Target's adb serial, i.e. `host:port`. */
+    /** The Target's identity, i.e. `host:port`. */
     val serial: String,
-    /** The Host port `adb forward` is listening on. */
+    /** Which way this session reaches the Target. */
+    val transport: TransportKind,
+    /** The Host port the tunnel is listening on. */
     val hostPort: Int,
     /** The scrcpy session id, as it appears in the socket name and in every log line. */
     val socketName: String,

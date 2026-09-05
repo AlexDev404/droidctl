@@ -9,6 +9,23 @@ import java.io.IOException
 import java.security.MessageDigest
 
 /**
+ * The scrcpy server jar, as [ScrcpyLauncher] needs it.
+ *
+ * An interface purely so the launcher can be exercised without an Android
+ * `Context`: what it does with the jar -- skip the push when the Target's copy
+ * already matches, time the push when it does not -- is transport-independent
+ * logic worth testing on the JVM. [ScrcpyServerAsset] is the only
+ * implementation that ships.
+ */
+interface ServerJar {
+    /** The SHA-256 of the jar, as computed at build time. */
+    suspend fun expectedSha256(): String
+
+    /** The jar as a file on the Host, ready to push. */
+    suspend fun extract(): Result<File>
+}
+
+/**
  * The bundled scrcpy server: extract it from assets, check it, push it to the
  * Target.
  *
@@ -21,12 +38,20 @@ import java.security.MessageDigest
  * license text ships alongside it at `assets/licenses/scrcpy-LICENSE` and is
  * shown by the in-app licenses screen.
  */
-class ScrcpyServerAsset(private val context: Context) {
+class ScrcpyServerAsset(private val context: Context) : ServerJar {
 
     private val log = DroidCtlLog.server
 
     /** Where the jar is cached on the Host once extracted from assets. */
     private val cachedJar: File get() = File(context.cacheDir, ASSET_NAME)
+
+    override suspend fun expectedSha256(): String = withContext(Dispatchers.IO) {
+        context.assets.open(SHA256_ASSET_NAME)
+            .use { it.readBytes() }
+            .toString(Charsets.UTF_8)
+            .trim()
+            .lowercase()
+    }
 
     /**
      * Extracts the jar to the Host's cache directory and verifies its SHA-256.
@@ -37,16 +62,7 @@ class ScrcpyServerAsset(private val context: Context) {
      * which otherwise surfaces on the Target as an opaque `ClassNotFoundException`
      * inside `app_process`.
      */
-    /** The SHA-256 of the bundled jar, as computed at build time. */
-    suspend fun expectedSha256(): String = withContext(Dispatchers.IO) {
-        context.assets.open(SHA256_ASSET_NAME)
-            .use { it.readBytes() }
-            .toString(Charsets.UTF_8)
-            .trim()
-            .lowercase()
-    }
-
-    suspend fun extract(): Result<File> = withContext(Dispatchers.IO) {
+    override suspend fun extract(): Result<File> = withContext(Dispatchers.IO) {
         runCatching {
             val expected = expectedSha256()
 
