@@ -1,0 +1,62 @@
+# Version catalog for the DroidCtl Android host app (:droidctl).
+#
+# The scrcpy C client (:app, meson) and the scrcpy server (:server, gradle) that
+# live in this repository do not consume this catalog; it exists solely for the
+# Android host application added under droidctl/.
+
+[versions]
+# The scrcpy client<->server protocol is NOT stable across releases. DroidCtl
+# derives every wire constant from the server sources in this repository, so the
+# pinned version is simply this repository's own server versionName.
+# :droidctl:checkScrcpyVersionPin fails the build if the two ever diverge.
+scrcpy = "4.1"
+
+agp = "9.1.0"
+kotlin = "2.2.21"
+# AndroidX 1.19 / Lifecycle 2.11 require compileSdk 37, which AGP 9.1.0 does
+# not support. These are the newest releases that build against compileSdk 36.
+coreKtx = "1.18.0"
+lifecycle = "2.10.0"
+activityCompose = "1.13.0"
+# Compose 1.12 (BOM 2026.08.00) requires compileSdk 37, which AGP 9.1.0 does not
+# support; 1.11.4 is the newest release that builds against compileSdk 36.
+composeBom = "2026.06.01"
+datastore = "1.2.1"
+# libsu is the only non-platform, non-AndroidX dependency. Justified because
+# holding a single long-lived root shell (rather than re-spawning `su` per adb
+# invocation) is a hard requirement: repeated su spawns are slow and trigger a
+# Magisk prompt storm. Hand-rolling that lifecycle correctly is exactly the
+# wheel libsu already implements.
+libsu = "6.0.0"
+# The SSH transport's client. Java ships no SSH, and shelling out to an ssh
+# binary would just swap the adb-ndk install requirement for another one --
+# defeating the point, which is a Host that needs nothing installed and no root.
+# This maintained fork of JSch is chosen over sshj because it has *no*
+# transitive dependencies: sshj drags in BouncyCastle, roughly ten megabytes
+# before shrinking, for API ergonomics this does not need.
+jsch = "2.28.7"
+junit = "4.13.2"
+
+[libraries]
+androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "coreKtx" }
+androidx-lifecycle-runtime-ktx = { module = "androidx.lifecycle:lifecycle-runtime-ktx", version.ref = "lifecycle" }
+androidx-lifecycle-runtime-compose = { module = "androidx.lifecycle:lifecycle-runtime-compose", version.ref = "lifecycle" }
+androidx-lifecycle-viewmodel-compose = { module = "androidx.lifecycle:lifecycle-viewmodel-compose", version.ref = "lifecycle" }
+androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "activityCompose" }
+androidx-compose-bom = { module = "androidx.compose:compose-bom", version.ref = "composeBom" }
+androidx-compose-ui = { module = "androidx.compose.ui:ui" }
+androidx-compose-ui-graphics = { module = "androidx.compose.ui:ui-graphics" }
+androidx-compose-ui-tooling = { module = "androidx.compose.ui:ui-tooling" }
+androidx-compose-ui-tooling-preview = { module = "androidx.compose.ui:ui-tooling-preview" }
+androidx-compose-material3 = { module = "androidx.compose.material3:material3" }
+androidx-compose-material-icons-extended = { module = "androidx.compose.material:material-icons-extended" }
+androidx-datastore-preferences = { module = "androidx.datastore:datastore-preferences", version.ref = "datastore" }
+libsu-core = { module = "com.github.topjohnwu.libsu:core", version.ref = "libsu" }
+libsu-io = { module = "com.github.topjohnwu.libsu:io", version.ref = "libsu" }
+jsch = { module = "com.github.mwiede:jsch", version.ref = "jsch" }
+junit = { module = "junit:junit", version.ref = "junit" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }

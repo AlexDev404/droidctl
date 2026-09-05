@@ -1,0 +1,96 @@
+name: DroidCtl
+
+# The Android host app added by this fork. Separate from release.yml so that
+# scrcpy's own release pipeline is untouched.
+
+on:
+  push:
+    paths:
+      - 'droidctl/**'
+      - 'server/**'
+      - 'relay/**'
+      - 'gradle/**'
+      - '*.gradle'
+      - 'settings.gradle'
+      - '.github/workflows/droidctl.yml'
+  pull_request:
+    paths:
+      - 'droidctl/**'
+      - 'server/**'
+      - 'relay/**'
+      - 'gradle/**'
+      - '*.gradle'
+      - 'settings.gradle'
+      - '.github/workflows/droidctl.yml'
+  workflow_dispatch:
+
+env:
+  # The repository's gradle.properties asks for 1536m, which is sized for
+  # building the scrcpy server jar on its own. Building :droidctl -- a Compose
+  # app, in two variants, with lint -- needs considerably more, and running out
+  # surfaces as an opaque "A failure occurred while executing
+  # <some>WorkAction" with the OutOfMemoryError nowhere in the summary.
+  # Overridden here rather than in gradle.properties so scrcpy's own builds keep
+  # upstream's setting.
+  GRADLE_OPTS: -Dorg.gradle.jvmargs=-Xmx4g -Dorg.gradle.daemon=false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup JDK
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      # One variant per step: it keeps peak memory down, and a failure names the
+      # variant instead of leaving two builds interleaved in one log.
+      # Also builds :server and :relay, since :droidctl bundles both.
+      - name: Build debug
+        run: ./gradlew :droidctl:assembleDebug --stacktrace
+
+      - name: Build release
+        run: ./gradlew :droidctl:assembleRelease --stacktrace
+
+      # Uploaded before the tests and lint run, so a failing check still leaves
+      # an installable build to reproduce the failure on real hardware with.
+      # The job's own status still depends on those checks.
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: droidctl-debug-apk
+          path: droidctl/build/outputs/apk/debug/droidctl-debug.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      # Unsigned: `apksigner` (or `gradle` with a signing config) has to sign it
+      # before a device will install it. The debug APK above is debug-signed and
+      # installs as-is.
+      - name: Upload unsigned release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: droidctl-release-apk-unsigned
+          path: droidctl/build/outputs/apk/release/droidctl-release-unsigned.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Unit tests
+        run: ./gradlew :droidctl:testDebugUnitTest --stacktrace
+
+      - name: Lint
+        run: ./gradlew :droidctl:lintDebug --stacktrace
+
+      - name: Upload test and lint reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: droidctl-reports
+          path: droidctl/build/reports/
+          retention-days: 30
